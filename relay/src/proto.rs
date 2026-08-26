@@ -52,6 +52,8 @@ pub struct Listener {
 #[derive(Debug, Clone, Deserialize)]
 pub struct YawPush {
     pub server_id: ServerId,
+    /// endpoint ごとに独立した counter (docs/protocol.md §1)
+    pub seq: u64,
     pub ts: i64,
     /// (SteamID, 度 0-355)
     pub yaws: Vec<(SteamId, u16)>,
@@ -71,6 +73,9 @@ pub struct Heard {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TalkPush {
     pub server_id: ServerId,
+    /// endpoint ごとに独立した counter (docs/protocol.md §1)
+    pub seq: u64,
+    pub ts: i64,
     pub id: SteamId,
     pub talking: bool,
 }

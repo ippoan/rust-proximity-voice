@@ -24,10 +24,13 @@ use std::sync::Arc;
 /// 本番の `main` を経由しないので `Config` を差し替えられる。
 pub fn build(cfg: Arc<config::Config>) -> (axum::Router, state::AppState) {
     let hub = Arc::new(signal::Hub::new());
-    let roster = Arc::new(roster::Roster::new());
 
     // Sfu は str0m のループが単独で所有する。外からは指令をチャネルで送る。
     let (sfu_tx, sfu_rx) = tokio::sync::mpsc::channel(256);
+
+    // Roster は起動時に依存を全部受け取る。routes() の中で後から差す形にすると、
+    // web.rs が routes() を呼び忘れた瞬間に whitelist と転送が無音で効かなくなる。
+    let roster = Arc::new(roster::Roster::new(cfg.clone(), sfu_tx.clone(), hub.clone()));
     {
         let hub = hub.clone();
         let port = cfg.udp_port;

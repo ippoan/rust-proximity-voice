@@ -13,7 +13,13 @@ use crate::state::AppState;
 pub struct Roster {}
 
 impl Roster {
-    pub fn new() -> Self {
+    /// 依存は**起動時に全部受け取る**。`routes()` の中で後から差さない
+    /// (呼び忘れると whitelist と転送が無音で効かなくなるため)。
+    pub fn new(
+        _cfg: std::sync::Arc<crate::config::Config>,
+        _sfu: tokio::sync::mpsc::Sender<crate::state::SfuCommand>,
+        _hub: std::sync::Arc<crate::signal::Hub>,
+    ) -> Self {
         todo!("#1-3")
     }
 
@@ -37,12 +43,6 @@ impl Roster {
     /// その聞き手がいま聞ける相手。TTL 切れなら空を返す。
     pub fn hears_of(&self, _id: &SteamId) -> Vec<Heard> {
         todo!("#1-3")
-    }
-}
-
-impl Default for Roster {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -77,7 +77,17 @@ X-PV-Signature: <hex(hmac_sha256(secret, timestamp + "." + body))>
 
 1. 署名一致（定数時間比較）
 2. `|now - timestamp| <= HMAC_SKEW_S`
-3. `seq` が同一 `server_id` について単調増加（巻き戻りは破棄）
+3. `seq` が **`(server_id, endpoint)` ごと**に単調増加（巻き戻りは破棄）
+
+**★ `seq` の採番は endpoint ごとに独立（親が確定、2026-08-26）**
+
+`roster` / `graph` / `yaw` / `talk` は**それぞれ別の counter**を持つ。`server_id` 単位で
+1 本にすると、レートの違う stream が互いを巻き戻し扱いして 401 が出続ける
+（`roster` は 0.5 Hz、`yaw` は 20 Hz）。検証側のキーは `"roster:main"` `"graph:main"` の形。
+
+**`yaw` と `talk` にも `seq` がある。** 初版は付けていなかったが、`talk` の
+リプレイは**本人が V を押していないのにマイクが送信状態になる**（ホットマイク）ため、
+30 秒窓のリプレイを許容できない。#1-3 の指摘で追加した。
 
 ### `POST /internal/roster`
 
@@ -129,7 +139,7 @@ X-PV-Signature: <hex(hmac_sha256(secret, timestamp + "." + body))>
 `YAW_HZ` = 20 で送る。**graph とは別便**。1 tick = 1 リクエストに全聞き手ぶんを詰める。
 
 ```json
-{ "server_id": "main", "ts": 1756180000, "yaws": [["76561198000000001", 145]] }
+{ "server_id": "main", "seq": 55120, "ts": 1756180000, "yaws": [["76561198000000001", 145]] }
 ```
 
 ### `POST /internal/talk`
@@ -137,7 +147,7 @@ X-PV-Signature: <hex(hmac_sha256(secret, timestamp + "." + body))>
 PTT の状態変化。押下・離しの都度、即時に送る。
 
 ```json
-{ "server_id": "main", "id": "76561198000000001", "talking": true }
+{ "server_id": "main", "seq": 311, "ts": 1756180000, "id": "76561198000000001", "talking": true }
 ```
 
 ---

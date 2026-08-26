@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::proto::{ServerMsg, SteamId};
+use crate::proto::SteamId;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -30,12 +30,18 @@ pub enum SfuCommand {
         steam_id: SteamId,
         candidate: serde_json::Value,
     },
-    /// 転送先の更新。**再ネゴシエーションを起こさず**スロット割り当てを差し替え、
-    /// 変化を `ServerMsg::Peer` の列で返す
+    /// 転送先の更新。**再ネゴシエーションを起こさず**スロット割り当てを差し替える。
+    ///
+    /// **`speakers` は距離の近い順で渡すこと** (並べる責任は呼び出し側)。
+    /// SFU は先頭 `proto::SLOTS` 件に切り詰める。
+    ///
+    /// **★ `ServerMsg::Peer` の送出は SFU 側が `hub` 経由で行う。**
+    /// 呼び出し側は流さないこと (二重送信になる)。`Disconnect` のように
+    /// reply を持たない指令でもスロットは動くので、送出元を 1 箇所に寄せる。
     SetSubscriptions {
         listener: SteamId,
         speakers: Vec<SteamId>,
-        reply: oneshot::Sender<anyhow::Result<Vec<ServerMsg>>>,
+        reply: oneshot::Sender<anyhow::Result<()>>,
     },
     /// その聞き手への **RTP 転送を止めるだけ**。**切断しない**
     /// (死亡・roster TTL 切れ。docs/protocol.md §0)
