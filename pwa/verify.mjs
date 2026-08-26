@@ -324,6 +324,126 @@ try {
     ? ok('可聴範囲の相手の距離 / 方位が UI 側へ出て行かない (ESP 防止)')
     : bad('UI へ渡る値に位置が混ざっている', leak);
 
+// --- C. WebRTC (ブラウザ内ループバック) -----------------------------------
+// リレーを立てずに rtc.js を通す。相手役の RTCPeerConnection を同じページに置き、
+// 「offer を受けて 16 本の recvonly に音を載せて answer を返す」だけをやらせる。
+// 見ているのは rtc.js 側の挙動 — m-line の並び / mid / answer 後の張り方 /
+// マイクの入り切りで再ネゴシエーションが起きないこと。
+const RTC_TEST = `(async () => {
+  const out = { steps: [] };
+  const engine = new PV.AudioEngine();
+  await engine.start();
+  const ctx = engine.ctx;
+
+  const tone = (hz) => {
+    const dst = ctx.createMediaStreamDestination();
+    const osc = ctx.createOscillator(); osc.frequency.value = hz;
+    const g = ctx.createGain(); g.gain.value = 0.6;
+    osc.connect(g); g.connect(dst); osc.start();
+    return dst.stream.getAudioTracks()[0];
+  };
+  const rms = (an) => { const b = new Float32Array(an.fftSize); an.getFloatTimeDomainData(b);
+                        let s = 0; for (const v of b) s += v * v; return Math.sqrt(s / b.length); };
+  const gathered = (pc) => pc.iceGatheringState === 'complete' ? Promise.resolve()
+    : new Promise(r => { const f = () => { if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', f); r(); } };
+                         pc.addEventListener('icegatheringstatechange', f); setTimeout(r, 4000); });
+
+  // PV.Signal の代役 — 送られたものを溜めるだけ
+  const signal = { sent: [], send(m) { this.sent.push(m); return true; } };
+  const rtc = new PV.Rtc(engine, signal);
+
+  const micTrack = tone(880);
+  await rtc.negotiate(micTrack);
+  const offer = signal.sent.find(m => m.t === 'sdp_offer');
+  out.offerSent = !!offer;
+  out.mLines = (offer.sdp.match(/^m=audio/gm) || []).length;
+  out.directions = (offer.sdp.match(/^a=(sendonly|recvonly|sendrecv|inactive)/gm) || []).map(s => s.slice(2));
+
+  // --- 相手役 (リレーの代役) ---
+  const server = new RTCPeerConnection();
+  await server.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
+  const stx = server.getTransceivers();
+  stx[0].direction = 'recvonly';                       // PWA のマイクを受ける側
+  for (let i = 1; i < stx.length; i++) stx[i].direction = 'sendonly';
+  const slotTx = stx[3];                               // 4 本目の m-line に声を載せる
+  const slotMid = slotTx.mid;
+  await slotTx.sender.replaceTrack(tone(330));
+  const micIn = ctx.createAnalyser();
+  ctx.createMediaStreamSource(new MediaStream([stx[0].receiver.track])).connect(micIn);
+
+  await server.setLocalDescription(await server.createAnswer());
+  await gathered(server);
+  await rtc.onAnswer(server.localDescription.sdp);
+
+  out.slotMids = rtc.slotMids.slice();
+  out.slotMidCount = rtc.slotMids.length;
+  out.micMid = stx[0].mid;
+  out.signalingState = rtc.pc.signalingState;
+
+  for (let i = 0; i < 100 && rtc.pc.connectionState !== 'connected'; i++) await new Promise(r => setTimeout(r, 100));
+  out.connectionState = rtc.pc.connectionState;
+
+  // 割り当てて鳴らす
+  engine.setPeer(slotMid, 'peer-a');
+  engine.applyGraph([{ id: 'peer-a', d: 2, b: 90, sub: true }]);
+  const slot = engine.slots[slotMid];
+  out.slotHasAudioEl = !!(slot && slot.audioEl && slot.audioEl.muted);
+  let peak = 0;
+  for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 50)); if (slot) peak = Math.max(peak, rms(slot.analyser)); }
+  out.heardRms = peak;
+  out.pan = slot ? slot.pan.pan.value : null;
+
+  // 60m の外へ出す → 無音になる (購読は張ったまま)
+  engine.applyGraph([{ id: 'peer-a', d: 70, b: 90, sub: true }]);
+  await new Promise(r => setTimeout(r, 900));
+  let farPeak = 0;
+  for (let i = 0; i < 10; i++) { await new Promise(r => setTimeout(r, 40)); farPeak = Math.max(farPeak, rms(slot.analyser)); }
+  out.farRms = farPeak;
+  out.farGain = slot.gain.gain.value;
+
+  // マイクの入り切りで再ネゴシエーションが起きないこと
+  await rtc.setMicEnabled(true);
+  let micPeak = 0;
+  for (let i = 0; i < 30; i++) { await new Promise(r => setTimeout(r, 50)); micPeak = Math.max(micPeak, rms(micIn)); }
+  out.micHeardRms = micPeak;
+  out.stateAfterMicOn = rtc.pc.signalingState;
+  await rtc.setMicEnabled(false);
+  await new Promise(r => setTimeout(r, 600));
+  let micOff = 0;
+  for (let i = 0; i < 15; i++) { await new Promise(r => setTimeout(r, 40)); micOff = Math.max(micOff, rms(micIn)); }
+  out.micOffRms = micOff;
+  out.stateAfterMicOff = rtc.pc.signalingState;
+  out.midsUnchanged = JSON.stringify(rtc.slotMids) === JSON.stringify(out.slotMids);
+
+  rtc.close(); server.close();
+  return out;
+})()`;
+
+console.log('\nC. WebRTC (ブラウザ内ループバック)');
+try {
+  const r = await page.eval(RTC_TEST);
+  r.mLines === 17 ? ok(`offer に m-line が 17 本 (マイク 1 + スロット ${PV.SLOTS})`) : bad('m-line の本数', String(r.mLines));
+  r.directions[0] === 'sendonly' && r.directions.slice(1).every(d => d === 'recvonly')
+    ? ok('先頭がマイク (sendonly)、以降がスロット (recvonly)') : bad('m-line の並び', r.directions.join(','));
+  r.micMid === '0' ? ok('マイクの mid は "0"') : bad('マイクの mid', String(r.micMid));
+  r.slotMidCount === PV.SLOTS ? ok(`answer 直後に ${PV.SLOTS} 本すべてを mid ごとに張った (ontrack を待たない)`)
+                              : bad('張られたスロット数', String(r.slotMidCount));
+  r.connectionState === 'connected' ? ok('PeerConnection が繋がる') : bad('繋がらない', r.connectionState);
+  r.slotHasAudioEl ? ok('リモートトラックが muted な <audio> にもアタッチされている') : bad('罠回避の <audio> が無い');
+  r.heardRms > 0.05 ? ok(`WebRTC 越しの音がスロットに流れている (RMS ${r.heardRms.toFixed(3)})`)
+                    : bad('WebRTC 越しの音が流れていない', String(r.heardRms));
+  Math.abs(r.pan - 1) < 0.05 ? ok(`定位が当たっている (b=90°, yaw=0° → pan ${r.pan.toFixed(3)})`) : bad('pan', String(r.pan));
+  r.farGain === 0 && r.farRms < 0.005
+    ? ok('60m の外へ出ると、購読を張ったまま gain が厳密に 0 になる') : bad('60m 外で無音にならない', `gain ${r.farGain} rms ${r.farRms}`);
+  r.micHeardRms > 0.01 ? ok(`talk on でマイクが相手側に届く (RMS ${r.micHeardRms.toFixed(3)})`) : bad('マイクが届かない', String(r.micHeardRms));
+  r.micOffRms < 0.01 ? ok(`talk off で止まる (RMS ${r.micOffRms.toFixed(4)})`) : bad('talk off でも送っている', String(r.micOffRms));
+  r.stateAfterMicOn === 'stable' && r.stateAfterMicOff === 'stable' && r.midsUnchanged
+    ? ok('マイクの入り切りで再ネゴシエーションが起きない (signalingState は stable のまま / mid も不変)')
+    : bad('再ネゴシエーションが起きている', `${r.stateAfterMicOn}/${r.stateAfterMicOff}`);
+} catch (e) {
+  bad('WebRTC ループバック', String(e && e.message || e));
+}
+
   // 3'. console
   const noise = [...cdp.logs, ...page.logs].filter(l => !/favicon/i.test(l));
   noise.length === 0 ? ok('console にエラー / 警告が無い (dev.html / index.html)')

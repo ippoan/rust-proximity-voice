@@ -69,6 +69,8 @@
   signal.on('ready', function (m) {
     me = m.steam_id;
     note('接続した (' + shortId(me) + ' @ ' + m.server_id + ')。ゲーム内で V を押すと送信される。');
+    // 再接続なら古い割り当ては無効。新しい peer が来るまで鳴らさない
+    engine.releaseAll();
     rtc.negotiate(mic.track).catch(function (e) {
       setLink('SDP 失敗', 'bad');
       note(String(e.message || e));

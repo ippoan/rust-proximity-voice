@@ -6,10 +6,10 @@
 //   - GET 以外   … /internal/* を含め、副作用のあるものをキャッシュしない
 //   - 別オリジン … opaque response を溜め込まない
 var VERSION = 'pv-v1';
+// 本番に要るもの。1 つでも取れなければ install を失敗させる (中途半端に入るより良い)
 var SHELL = [
   './',
   './index.html',
-  './dev.html',
   './css/app.css',
   './js/protocol.js',
   './js/audio.js',
@@ -18,16 +18,19 @@ var SHELL = [
   './js/mic.js',
   './js/mic-worklet.js',
   './js/app.js',
-  './js/dev.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png'
 ];
+// 開発用。配られていなくても本番の install を巻き添えにしない
+var EXTRA = ['./dev.html', './js/dev.js'];
 
 self.addEventListener('install', function (e) {
-  e.waitUntil(caches.open(VERSION).then(function (c) { return c.addAll(SHELL); }).then(function () {
-    return self.skipWaiting();
-  }));
+  e.waitUntil(caches.open(VERSION).then(function (c) {
+    return c.addAll(SHELL).then(function () {
+      return Promise.all(EXTRA.map(function (u) { return c.add(u).catch(function () {}); }));
+    });
+  }).then(function () { return self.skipWaiting(); }));
 });
 
 self.addEventListener('activate', function (e) {

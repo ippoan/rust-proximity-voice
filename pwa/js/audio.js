@@ -152,6 +152,14 @@ window.PV = window.PV || {};
   };
 
   /**
+   * 再接続したとき。**スロットのノードは残したまま**、割り当てだけを白紙に戻す。
+   * 新しい PeerConnection の peer が来るまで、古い対応で鳴らさないため。
+   */
+  AudioEngine.prototype.releaseAll = function () {
+    for (var mid in this.slots) this.setPeer(mid, null);
+  };
+
+  /**
    * { "t":"graph", hears:[{id,d,b,sub}] } — 2Hz・変化時のみ。
    * hears は「今そのブラウザが聞ける相手」の**全状態**。載っていない相手は無音にする。
    */

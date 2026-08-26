@@ -45,7 +45,13 @@ node pwa/verify.mjs
 4. yaw を振ると `StereoPannerNode.pan` が左右に振れること
 5. **`MediaStreamTrack` を繋いだスロットに実際に音が流れること**（下の罠）
 6. マイク経路 (`getUserMedia → AudioWorklet → MediaStreamDestination`)。talk off で完全な無音であること
-7. console にエラーが出ていないこと
+7. **WebRTC をブラウザ内ループバックで通す** — offer の m-line が 17 本 (マイク先頭)、
+   `answer` 直後に 16 本を mid ごとに張ること、WebRTC 越しの音が Web Audio に届くこと、
+   マイクの入り切りで `signalingState` が `stable` のまま (= 再ネゴシエーションが起きない) こと
+8. console にエラーが出ていないこと
+
+**リレーを立てての実地確認はまだ。** ループバックは相手役を同じページに置いているので、
+リレー (#1-1) の `Peer` / `graph` / `yaw` / `talk` の実メッセージまでは通していない。
 
 ## 踏み抜いた / 避けた罠
 

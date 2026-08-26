@@ -83,6 +83,7 @@ window.PV = window.PV || {};
       var t = txs[i];
       if (!t.mid) continue;
       if (t.sender && t.sender === this.micSender) continue;  // 先頭のマイクは受信スロットではない
+      if (t.currentDirection === 'sendonly' || t.direction === 'sendonly') continue;
       var track = t.receiver && t.receiver.track;
       if (!track || track.kind !== 'audio') continue;
       this.engine.attachTrack(t.mid, track);
