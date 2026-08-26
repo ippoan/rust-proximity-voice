@@ -25,7 +25,10 @@
 //   7. 話者が**行儀悪く**消えても (タブごと kill = DTLS の close すら送らない)
 //      同じことが起きる。★ ここを見ていなかったせいで issue #5 を見逃した。
 //      §0 が名指ししている「Alt-F4 / クラッシュ」はこちらであって 6 ではない
-//   8. どの段階でも mid が動かない (= 再ネゴシエーションが起きていない)
+//   8. WS だけ閉じて WebRTC を開いたままにしても枠が解放される (issue #7)。
+//      制御チャネルが無いセッションは正しく動けないので畳む。ICE の検出
+//      (20〜25s) を待たないぶん、7 より明確に速い
+//   9. どの段階でも mid が動かない (= 再ネゴシエーションが起きていない)
 
 import { createHmac } from 'node:crypto';
 
@@ -276,6 +279,55 @@ console.log('alice の pc:', aliceAfterKill);
 if (aliceAfterKill !== 'connected') throw new Error('相手を kill したら alice まで切れた');
 if (JSON.stringify(midsAfterKill) !== JSON.stringify(shape.mids)) throw new Error('mid が動いた');
 
+// --- 8. ★ WS だけ閉じて WebRTC は開いたまま (issue #7) ------------------------
+// 制御チャネルが死ぬと `Peer` が届かなくなり、クライアントの mid ↔ SteamID 対応が
+// 凍る。それでもサーバーが割り当てを動かすと「A の声が B の名前で鳴る」。
+// WebRTC が生きているので ICE は落ちない = 7 の経路では永久に回収されない。
+console.log('\n--- WS だけ閉じる (WebRTC は開いたまま) ---');
+console.log('POST /internal/roster →', await internal('/internal/roster', { eligible: ['alice', 'dave'] }));
+
+const dave = await Cdp.attach(portB, `${HTTP}/?steam_id=dave`);
+await dave.eval(`document.getElementById('connect').click(); 1`);
+await waitFor(() => dave.eval(`typeof pc !== 'undefined' && !!pc && pc.connectionState === 'connected'`),
+              'dave が connected になる');
+console.log('POST /dev/subscribe →', await post('/dev/subscribe', { listener: 'alice', speakers: ['dave'] }));
+
+const v0 = await alice.eval(RX_BYTES);
+await sleep(2500);
+const v1 = await alice.eval(RX_BYTES);
+console.log(`dave からの受信バイト: ${v0} → ${v1} (差 ${v1 - v0})`);
+if (v1 - v0 < 1000) throw new Error('dave の音が通っていない');
+
+// ★ WS だけ閉じる。pc は触らない
+console.log('dave の ws を閉じる (pc.close() は呼ばない)');
+await dave.eval(`ws.close(); 1`);
+const stillOpen = await dave.eval(`pc.connectionState`);
+console.log('dave の pc は開いたまま:', stillOpen);
+if (stillOpen !== 'connected') throw new Error('pc まで閉じてしまった。シナリオが成立していない');
+
+const tWs = Date.now();
+await waitFor(async () => {
+  const rows = await alice.eval(SLOT_TABLE);
+  return rows.length === 0 ? true : null;
+}, 'WS の切断で枠が解放される', 30000);
+const wsSecs = (Date.now() - tWs) / 1000;
+console.log(`枠が解放されるまで ${wsSecs.toFixed(1)}s`);
+// 受け入れ条件: ICE 待ち (20〜25s) より明確に短いこと
+if (wsSecs > 10) throw new Error(`ICE 待ちと変わらない (${wsSecs.toFixed(1)}s)。WS を合図に使えていない`);
+
+const w0 = await alice.eval(RX_BYTES);
+await sleep(3000);
+const w1 = await alice.eval(RX_BYTES);
+console.log(`WS 切断後の受信バイト: ${w0} → ${w1} (差 ${w1 - w0})`);
+if (w1 - w0 > 500) throw new Error('WS を閉じたのに RTP が流れている');
+
+const aliceEnd = await alice.eval(`pc.connectionState`);
+const midsEnd = await alice.eval(`pc.getTransceivers().map(t => t.mid)`);
+console.log('alice の pc:', aliceEnd);
+if (aliceEnd !== 'connected') throw new Error('相手の WS が落ちて alice まで切れた');
+if (JSON.stringify(midsEnd) !== JSON.stringify(shape.mids)) throw new Error('mid が動いた');
+
 console.log('\n✅ 名簿外は断られ、音が通り、mute で止まり、再開で戻り、');
-console.log('   行儀よく閉じても行儀悪く消えても枠が解放され、mid は一度も動かなかった');
+console.log('   行儀よく閉じても・行儀悪く消えても・WS だけ落ちても枠が解放され、');
+console.log('   mid は一度も動かなかった');
 process.exit(0);

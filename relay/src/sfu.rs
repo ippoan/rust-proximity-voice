@@ -612,6 +612,7 @@ impl Sfu {
         }
 
         self.reap_disconnected(now, hub);
+        self.reap_orphaned(hub);
 
         for id in dead {
             tracing::info!(steam_id = %id, "rtc が死んだので回収");
@@ -656,6 +657,20 @@ impl Sfu {
                 speakers,
                 reply,
             } => {
+                // ★ **伝えられない変更は起こさない** (issue #7)。
+                //
+                // WS が死ぬと `Peer` が届かなくなり、クライアントの
+                // mid ↔ SteamID 対応はその瞬間で凍る。それでもサーバーが
+                // 割り当てを動かし続けると「A の声が B の名前で鳴る」。
+                //
+                // 状態を変えてから送って、失敗を `Err` で返すだけでは駄目で
+                // (変更はもう起きている)、**変える前に断る**必要がある。
+                if !hub.is_connected(&listener) {
+                    let _ = reply.send(Err(anyhow::anyhow!(
+                        "WS が無いので購読を変えない: {listener}"
+                    )));
+                    return;
+                }
                 // ★ `Peer` の送出は SFU が一手に引き受ける (state.rs の契約)。
                 // `Disconnect` のように reply の無い指令でもスロットは動くので、
                 // 呼び出し側に流させると、その経路で誰も送れなくなる
@@ -690,6 +705,37 @@ impl Sfu {
             if session.rtc.is_alive() {
                 let _ = session.rtc.handle_input(Input::Timeout(now));
             }
+        }
+    }
+
+    /// **WS が無いセッションを終了させる** (issue #7)。
+    ///
+    /// WS は制御チャネルなので、死ぬと `Peer` が届かなくなり、クライアントの
+    /// mid ↔ SteamID 対応がその瞬間で凍る。制御チャネルの無いセッションは
+    /// WebRTC が生きていても正しく動けないので、区別せず畳む。
+    ///
+    /// **猶予を置かない。** `DISCONNECT_GRACE_S` は回線の一時的な揺れのためのもので、
+    /// WS の切断は TCP なので曖昧さが無い。同じ WS が戻ってくることは無く、
+    /// 再接続は新しいセッションになる。ICE の検出 (20〜25s) を待たずに済むぶん、
+    /// 枠の解放もこちらのほうが速い。
+    ///
+    /// **`Bye` は送らない。** 送る先がもう無い。
+    ///
+    /// ★ ここが「Hub の登録が SFU セッションの生存条件」という不変条件の実体。
+    /// 経路ごとに畳み忘れないよう、1 箇所で見る。二重接続で後勝ちした場合は
+    /// `Hub::register` が登録を差し替えるだけなので、ここには引っかからない。
+    fn reap_orphaned(&mut self, hub: &Hub) {
+        let orphaned: Vec<SteamId> = self
+            .sessions
+            .keys()
+            .filter(|id| !hub.is_connected(id))
+            .cloned()
+            .collect();
+
+        for id in orphaned {
+            tracing::info!(steam_id = %id, "ws が無いのでセッションを畳む");
+            self.remove_session(&id);
+            self.release_speaker(&id, hub);
         }
     }
 
@@ -1249,6 +1295,176 @@ a=mid:3\r\n";
         // 転送は SetSubscriptions で戻る
         sfu.set_subscriptions(&listener, &[]).unwrap();
         assert!(!sfu.session(&listener).unwrap().is_muted());
+    }
+
+    // -- WS が死んだセッション (issue #7) ------------------------------------
+
+    /// WS が死ぬと `ServerMsg::Peer` が届かなくなるので、クライアントの
+    /// mid ↔ SteamID 対応はその瞬間で凍る。**サーバーが割り当てを動かし続けると
+    /// 「A の声が B の名前で鳴る」**。届けられないなら動かしてはいけない。
+    #[tokio::test]
+    async fn ws_が死んだセッションのスロットは動かさない() {
+        let mut sfu = Sfu::new(0).unwrap();
+        let hub = Hub::new();
+        let listener = "listener".to_string();
+        let a = "speakerA".to_string();
+        let b = "speakerB".to_string();
+        insert_fake_session(&mut sfu, &listener, SLOTS);
+
+        // WS が生きているうちに A を割り当てる
+        let reg = hub.register(listener.clone()).unwrap();
+        set_subs(&mut sfu, &hub, &listener, std::slice::from_ref(&a));
+        let mid_a = sfu
+            .session(&listener)
+            .unwrap()
+            .slots()
+            .mid_of(&a)
+            .unwrap()
+            .to_string();
+
+        // WS が死ぬ (web.rs は unregister する)
+        hub.unregister(&listener, reg.token);
+        drop(reg);
+
+        // プレイヤーはまだゲーム内に居るので graph は 2 Hz で来続ける
+        set_subs(&mut sfu, &hub, &listener, std::slice::from_ref(&b));
+
+        let session = sfu.session(&listener).unwrap();
+        assert_eq!(
+            session.slots().mid_of(&a),
+            Some(mid_a.as_str()),
+            "届けられないのに A の枠を外した"
+        );
+        assert!(
+            session.slots().mid_of(&b).is_none(),
+            "届けられないのに B を割り当てた (B の声が A として鳴る)"
+        );
+    }
+
+    /// `MuteAll` が「当面の緩和策」として機能していなかった件。
+    /// `set_subscriptions` が `muted = false` を**先に**書いてから配送し、
+    /// 配送の失敗をロールバックしていなかった。
+    #[tokio::test]
+    async fn ws_が死んだセッションの_mute_は次の_graph_で解けない() {
+        let mut sfu = Sfu::new(0).unwrap();
+        let hub = Hub::new();
+        let listener = "listener".to_string();
+        insert_fake_session(&mut sfu, &listener, SLOTS);
+
+        let reg = hub.register(listener.clone()).unwrap();
+        hub.unregister(&listener, reg.token);
+        drop(reg);
+        sfu.mute_all(&listener).unwrap();
+
+        set_subs(&mut sfu, &hub, &listener, &["speaker".to_string()]);
+
+        assert!(
+            sfu.session(&listener).unwrap().is_muted(),
+            "WS が無いのに mute が解けた"
+        );
+    }
+
+    /// WS が生きている限りは、これまでどおり動くこと。
+    #[tokio::test]
+    async fn ws_が生きていればスロットは動く() {
+        let mut sfu = Sfu::new(0).unwrap();
+        let hub = Hub::new();
+        let listener = "listener".to_string();
+        let speaker = "speaker".to_string();
+        let _reg = hub.register(listener.clone()).unwrap();
+        insert_fake_session(&mut sfu, &listener, SLOTS);
+
+        set_subs(&mut sfu, &hub, &listener, std::slice::from_ref(&speaker));
+        assert!(
+            sfu.session(&listener)
+                .unwrap()
+                .slots()
+                .mid_of(&speaker)
+                .is_some()
+        );
+        assert!(!sfu.session(&listener).unwrap().is_muted());
+    }
+
+    #[tokio::test]
+    async fn ws_が無いセッションは畳まれる() {
+        let mut sfu = Sfu::new(0).unwrap();
+        let hub = Hub::new();
+        let listener = "listener".to_string();
+        let speaker = "speaker".to_string();
+
+        let listener_reg = hub.register(listener.clone()).unwrap();
+        let speaker_reg = hub.register(speaker.clone()).unwrap();
+        insert_fake_session(&mut sfu, &listener, SLOTS);
+        insert_fake_session(&mut sfu, &speaker, SLOTS);
+        set_subs(&mut sfu, &hub, &listener, std::slice::from_ref(&speaker));
+        let mid = sfu
+            .session(&listener)
+            .unwrap()
+            .slots()
+            .mid_of(&speaker)
+            .unwrap()
+            .to_string();
+
+        // WS が生きているうちは畳まれない
+        sfu.reap_orphaned(&hub);
+        assert!(sfu.has_session(&speaker));
+
+        // 話者の WS だけが落ちる (WebRTC は生きたまま)
+        hub.unregister(&speaker, speaker_reg.token);
+        drop(speaker_reg);
+        sfu.reap_orphaned(&hub);
+
+        assert!(!sfu.has_session(&speaker), "ws が無いのに残っている");
+        assert!(
+            sfu.session(&listener)
+                .unwrap()
+                .slots()
+                .mid_of(&speaker)
+                .is_none(),
+            "畳んだのに枠が残っている"
+        );
+        assert!(
+            sfu.has_session(&listener),
+            "相手の ws が落ちて聞き手まで畳まれた"
+        );
+
+        // 聞き手には解放が届く
+        let mut rx = listener_reg.rx;
+        let mut released = false;
+        while let Ok(msg) = rx.try_recv() {
+            if matches!(&msg, ServerMsg::Peer { mid: m, id: None } if *m == mid) {
+                released = true;
+            }
+        }
+        assert!(released, "解放の Peer が届いていない");
+    }
+
+    /// 二重接続は登録を差し替えるだけなので、畳んではいけない。
+    #[tokio::test]
+    async fn 二重接続で畳まれない() {
+        let mut sfu = Sfu::new(0).unwrap();
+        let hub = Hub::new();
+        let id = "listener".to_string();
+
+        let _first = hub.register(id.clone()).unwrap();
+        insert_fake_session(&mut sfu, &id, SLOTS);
+        let _second = hub.register(id.clone()).unwrap(); // 後勝ち
+
+        sfu.reap_orphaned(&hub);
+        assert!(sfu.has_session(&id), "後勝ちの登録があるのに畳まれた");
+    }
+
+    /// `SfuCommand::SetSubscriptions` を 1 回投げる。
+    fn set_subs(sfu: &mut Sfu, hub: &Hub, listener: &str, speakers: &[SteamId]) {
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        sfu.handle_command(
+            SfuCommand::SetSubscriptions {
+                listener: listener.to_string(),
+                speakers: speakers.to_vec(),
+                reply,
+            },
+            hub,
+        );
     }
 
     #[tokio::test]

@@ -199,22 +199,20 @@ async fn serve_ws(socket: WebSocket, st: WsState, steam_id: SteamId) {
         }
     }
 
-    // 後始末。
+    // 後始末は **Hub の登録を外すだけ**。
     //
-    // **ここで `Disconnect` は送らない。** `Disconnect` は Bye を伴う 3 場面
-    // (二重接続・BAN・shutdown) 専用で、ブラウザが自分で閉じた WS はそのどれでもない。
-    // §0 の「切断 → 即座に転送停止 → 猶予 60s 後にトランスポート回収」に従い、
-    // 転送だけ止める。トランスポートは ICE が落ちた時点で `sfu::run` が回収し、
-    // その人を掴んでいた聞き手の枠もそこで解放される。
+    // **ここで `Disconnect` は送らない。** `Disconnect` は `Bye` を伴う 3 場面
+    // (二重接続・BAN・shutdown) 専用で、ブラウザが自分で閉じた WS はそのどれでもない
+    // — 送る相手がもう居ないので `Bye` の reason を選びようがない。
+    //
+    // 代わりに **「Hub の登録が SFU セッションの生存条件」** という不変条件に任せる
+    // (issue #7)。登録が消えれば `sfu::run` が次の周回でセッションを畳み、
+    // 転送を止め、その人を掴んでいた聞き手の枠も解放する。
+    //
+    // 経路ごとに「畳んでください」と言って回る形にすると、言い忘れた経路が
+    // 静かに壊れる。生存条件を 1 つにして 1 箇所で見るほうが落ちない。
     pump.abort();
     st.app.hub.unregister(&steam_id, token);
-    let _ = st
-        .app
-        .sfu
-        .send(SfuCommand::MuteAll {
-            listener: steam_id.clone(),
-        })
-        .await;
     tracing::info!(steam_id = %steam_id, "ws closed");
 }
 
