@@ -84,7 +84,16 @@ async fn main() -> anyhow::Result<()> {
     let static_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
     let app = web::dev_router(st.clone(), static_dir).merge(dev_api(st));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
+    // bind 先は既定で 127.0.0.1。
+    //
+    // **既定を 0.0.0.0 にしない理由**: 開発用サーバーを外部に晒す必要はなく、
+    // 環境によっては 0.0.0.0 への bind が許可されていない (実害: #1-2 の
+    // セッションで permission classifier に落とされ、PWA の実地確認ができなかった)。
+    // ローカル検証は loopback で足りる。外から繋ぎたいときだけ明示する。
+    let bind_host = std::env::var("PV_DEV_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr: SocketAddr = format!("{bind_host}:{http_port}")
+        .parse()
+        .map_err(|e| anyhow::anyhow!("PV_DEV_BIND=\"{bind_host}\" を解釈できない: {e}"))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, udp_port, "dev relay listening");
     tracing::info!("ブラウザ 2 枚で http://localhost:{http_port}/?steam_id=alice と ?steam_id=bob");
