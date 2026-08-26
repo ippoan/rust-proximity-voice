@@ -268,6 +268,40 @@ try {
   far.rms < 0.005 ? ok(`d=70m では音が出ない (RMS ${far.rms.toFixed(5)})`) : bad('60m を超えても鳴っている', `RMS ${far.rms}`);
   far.speaking === 0 ? ok('聞こえない相手は「発話中」に出ない (ESP 防止)') : bad('聞こえない相手が発話中に出ている');
 
+
+  // 6c. ★ **graph が peer より先に来ても拾えること。**
+  //     リレー側で Graph は Hub へ直接、Peer は SFU のタスク経由で出るので、
+  //     接続時の撒き直し (issue #11) では graph が先に届く。graph は「変化時のみ」なので、
+  //     ここで取りこぼすと静止した場面では次が来ず、永久に無音になる。
+  const order = await cdp.eval(`(async () => {
+    const eng = window.__engine;
+    const ctx = eng.ctx;
+    const dst = ctx.createMediaStreamDestination();
+    const osc = ctx.createOscillator(); osc.frequency.value = 300;
+    const g = ctx.createGain(); g.gain.value = 0.5; osc.connect(g); g.connect(dst); osc.start();
+    eng.attachTrack('12', dst.stream.getAudioTracks()[0]);
+    eng.setYaw(0);   // 直前の yaw 試験で 270° のままなので、明示的に戻す
+    // ★ 先に graph、後から peer
+    eng.applyGraph([{ id: 'late-peer', d: 2, b: 90, sub: true }]);
+    eng.setPeer('12', 'late-peer');
+    await new Promise(r => setTimeout(r, 900));
+    const slot = eng.slots['12'];
+    const b = new Float32Array(slot.analyser.fftSize);
+    slot.analyser.getFloatTimeDomainData(b);
+    let s = 0; for (const v of b) s += v * v;
+    const rms = Math.sqrt(s / b.length);
+    const gain = slot.gain.gain.value, pan = slot.pan.pan.value;   // 消す**前**に読む
+    // その後 graph から消えたら無音へ戻ること (置き換えであって差分ではない)
+    eng.applyGraph([]);
+    await new Promise(r => setTimeout(r, 900));
+    return { gain, pan, rms, goneGain: slot.gain.gain.value };
+  })()`);
+  order.gain > 0.9 && order.rms > 0.05
+    ? ok(`graph → peer の順で届いても鳴る (gain ${order.gain.toFixed(3)}, RMS ${order.rms.toFixed(3)})`)
+    : bad('graph が peer より先だと拾えていない', `gain ${order.gain} rms ${order.rms}`);
+  Math.abs(order.pan - 1) < 0.05 ? ok('  その場合も定位が当たっている') : bad('  pan', String(order.pan));
+  order.goneGain === 0 ? ok('  graph から消えたら無音へ戻る (差分ではなく置き換え)') : bad('  消えても鳴っている', String(order.goneGain));
+
   // 7. マイク経路。**本番ページ (index.html) 側**で見る。dev.html は mic.js を読まない
   const page = await Cdp.open(`${base}/index.html`);
   for (let i = 0; i < 100; i++) {
@@ -510,14 +544,16 @@ console.log('\nD. リレー (relay/examples/dev_relay) 相手の実地確認');
     denied.wantOpen === false ? ok('not_eligible では signal.js が再接続を諦める') : bad('not_eligible なのに再接続しようとする');
 
     // D-2. 名簿に載せて 2 人ぶん繋ぐ
-    const pushed = await internal('/internal/roster', { eligible: ['alice', 'bob'] });
+    const ELIGIBLE = ['alice', 'bob', 'carol', 'dave'];
+    const pushed = await internal('/internal/roster', { eligible: ELIGIBLE });
     // 成功は 204 No Content (本文を返さない)。2xx なら通っている
     /^2\d\d/.test(pushed) ? ok(`POST /internal/roster (HMAC 付き) が通る (${pushed.trim()})`) : bad('roster push', pushed);
     // ROSTER_TTL_S = 10 で切られるので、試験中は push し続ける
-    keepalive = setInterval(() => { internal('/internal/roster', { eligible: ['alice', 'bob'] }).catch(() => {}); }, 2500);
+    keepalive = setInterval(() => { internal('/internal/roster', { eligible: ELIGIBLE }).catch(() => {}); }, 2500);
 
     const setup = await relayPage.eval(`(async () => {
       window.__c = {};
+      const WSBASE = ${JSON.stringify(WS)};
       const toneCtx = new AudioContext();
       const tone = (hz) => { const d = toneCtx.createMediaStreamDestination();
         const o = toneCtx.createOscillator(); o.frequency.value = hz;
@@ -525,16 +561,22 @@ console.log('\nD. リレー (relay/examples/dev_relay) 相手の実地確認');
         return d.stream.getAudioTracks()[0]; };
       const client = async (id, hz) => {
         const engine = new PV.AudioEngine(); await engine.start();
-        const sig = new PV.Signal(${JSON.stringify(WS)} + '?steam_id=' + id);
+        const sig = new PV.Signal(WSBASE + '?steam_id=' + id);
         const rtc = new PV.Rtc(engine, sig);
-        const peers = [];
+        const peers = [], graphs = [], yaws = [], order = [];
         sig.on('ready', () => rtc.negotiate(tone(hz)).catch(e => peers.push({ err: String(e) })));
         sig.on('sdp_answer', m => rtc.onAnswer(m.sdp).then(() => rtc.setMicEnabled(true)));
         sig.on('ice', m => rtc.onIce(m.candidate));
-        sig.on('peer', m => { peers.push({ mid: m.mid, id: m.id }); engine.setPeer(m.mid, m.id); });
+        sig.on('peer', m => { order.push('peer'); peers.push({ mid: m.mid, id: m.id }); engine.setPeer(m.mid, m.id); });
+        // app.js と同じ結線。**ここで applyGraph するのが唯一の音量の源**なので、
+        // graph が来なければ何も鳴らない (fail closed)
+        sig.on('graph', m => { order.push('graph'); graphs.push(m); engine.applyGraph(m.hears); });
+        sig.on('yaw', m => { yaws.push(m.deg); engine.setYaw(m.deg); });
         sig.open();
-        return { engine, sig, rtc, peers };
+        return { engine, sig, rtc, peers, graphs, yaws, order };
       };
+      window.__client = client;
+      window.__tone = tone;
       window.__c.alice = await client('alice', 440);
       window.__c.bob = await client('bob', 330);
       const wait = async (f, ms) => { const t0 = Date.now();
@@ -623,6 +665,90 @@ console.log('\nD. リレー (relay/examples/dev_relay) 相手の実地確認');
                     : bad('戻しても鳴らない', String(back.rms));
     JSON.stringify(back.slotMids) === JSON.stringify(midsBefore) && back.signaling === 'stable'
       ? ok('一連の出入りで mid が一度も動いていない') : bad('mid が動いた');
+
+    // D-7. **fail closed の回帰テスト。** peer が来てスロットが割り当たり、RTP まで
+    //      流れていても、graph が 1 通も来ていない相手は鳴らしてはいけない
+    //      (docs/protocol.md §0 — 「聞こえてはいけない音声が届かない」)。
+    //      d 未知 = 無音 は意図した挙動であり、うっかり緩めないための歯止め。
+    const carol = await relayPage.eval(`(async () => {
+      window.__c.carol = await window.__client('carol', 520);
+      const c = window.__c.carol;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 25000 && !(c.rtc.pc && c.rtc.pc.connectionState === 'connected')) await new Promise(r => setTimeout(r, 100));
+      return { conn: c.rtc.pc && c.rtc.pc.connectionState };
+    })()`);
+    carol.conn === 'connected' ? ok('carol が繋がる (graph は 1 通も push しない)') : bad('carol が繋がらない', String(carol.conn));
+
+    await dev('/dev/subscribe', { listener: 'carol', speakers: ['bob'] });
+    const closed = await relayPage.eval(`(async () => {
+      const c = window.__c.carol;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 10000 && !c.peers.some(p => p.id === 'bob')) await new Promise(r => setTimeout(r, 100));
+      const p = c.peers.find(x => x.id === 'bob');
+      if (!p) return { assigned: false };
+      const slot = c.engine.slots[p.mid];
+      let peak = 0;
+      for (let i = 0; i < 60; i++) { await new Promise(r => setTimeout(r, 50));
+        const b = new Float32Array(slot.analyser.fftSize); slot.analyser.getFloatTimeDomainData(b);
+        let s = 0; for (const v of b) s += v * v; peak = Math.max(peak, Math.sqrt(s / b.length)); }
+      let bytes = 0;
+      (await c.rtc.pc.getStats()).forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio') bytes += r.bytesReceived || 0; });
+      const heardIds = c.graphs.flatMap(g => (g.hears || []).map(h => h.id));
+      return { assigned: true, rms: peak, gain: slot.gain.gain.value, d: slot.d,
+               bytes, graphs: c.graphs.length, heardIds, speaking: c.engine.speaking().length };
+    })()`);
+    closed.assigned ? ok('carol にも peer が来てスロットが割り当たる') : bad('carol に peer が来ない');
+    closed.bytes > 0 ? ok(`carol には RTP が届いている (${closed.bytes} bytes)`) : bad('RTP が届いていない', String(closed.bytes));
+    // 接続時の resync で**空の** graph は届く。それは正しい (「今は誰も聞こえない」の通知)。
+    // 要件は「bob が載った graph が来ていないのに鳴っていない」こと
+    closed.heardIds.length === 0
+      ? ok(`carol の graph に載った相手はゼロ (graph ${closed.graphs} 通、すべて空)`)
+      : bad('聞こえるはずのない相手が graph に載った', closed.heardIds.join(','));
+    closed.gain === 0 && closed.rms < 0.005
+      ? ok('★ graph の無い相手は鳴らない (d 未知 = 無音。fail closed)')
+      : bad('graph が無いのに鳴っている', `gain ${closed.gain} rms ${closed.rms}`);
+    closed.speaking === 0 ? ok('graph の無い相手は「発話中」にも出ない') : bad('発話中に出ている');
+
+    // D-8. **issue #11。** 名簿と graph を push して**静止させ**、その後で接続する。
+    //      graph は「変化時のみ」なので、接続後には 1 通も飛んでこない。
+    //      リレーが接続時に今の状態を撒かないと、この PWA は永久に無音のまま。
+    await internal('/internal/yaw', { yaws: [['dave', 0]] });
+    await internal('/internal/graph', {
+      listeners: [{ id: 'dave', hears: [{ id: 'bob', d: 2, b: 90, sub: true }] }]
+    });
+    await new Promise(r => setTimeout(r, 500));   // ここから先、graph は一切 push しない (= 静止)
+    const late = await relayPage.eval(`(async () => {
+      window.__c.dave = await window.__client('dave', 610);
+      const d = window.__c.dave;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 25000 && !(d.rtc.pc && d.rtc.pc.connectionState === 'connected')) await new Promise(r => setTimeout(r, 100));
+      // 接続後、graph / peer が来るのを待つ
+      const t1 = Date.now();
+      while (Date.now() - t1 < 8000 && !(d.graphs.length && d.peers.some(p => p.id === 'bob'))) await new Promise(r => setTimeout(r, 100));
+      const p = d.peers.find(x => x.id === 'bob');
+      let peak = 0, gain = null, pan = null;
+      if (p) { const slot = d.engine.slots[p.mid];
+        for (let i = 0; i < 60; i++) { await new Promise(r => setTimeout(r, 50));
+          const b = new Float32Array(slot.analyser.fftSize); slot.analyser.getFloatTimeDomainData(b);
+          let s = 0; for (const v of b) s += v * v; peak = Math.max(peak, Math.sqrt(s / b.length)); }
+        gain = slot.gain.gain.value; pan = slot.pan.pan.value; }
+      let bytes = 0;
+      (await d.rtc.pc.getStats()).forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio') bytes += r.bytesReceived || 0; });
+      return { conn: d.rtc.pc && d.rtc.pc.connectionState, graphs: d.graphs.length, yaws: d.yaws.length,
+               heardIds: d.graphs.flatMap(g => (g.hears || []).map(h => h.id)),
+               peer: !!p, peers: d.peers.slice(), bytes, rms: peak, gain, pan, order: d.order.slice() };
+    })()`);
+    late.conn === 'connected' ? ok('dave が繋がる') : bad('dave が繋がらない', String(late.conn));
+    late.graphs > 0 ? ok(`★ 静止したまま接続しても graph が届く (${late.graphs} 通)`)
+                    : bad('★ 途中参加に graph が来ない (issue #11)', '0 通 — 誰かが動くまで永久に無音');
+    late.heardIds.includes('bob')
+      ? ok(`graph の中身も正しい (hears に bob が載っている: ${late.heardIds.join(',')})`)
+      : bad('graph は来たが bob が載っていない', late.heardIds.join(',') || '(空)');
+    late.peer ? ok('接続時に peer が来てスロットが割り当たる')
+              : bad('接続時に peer が来ない', `peers=${JSON.stringify(late.peers)} 受信 ${late.bytes} bytes — graph は届いているので購読 (SetSubscriptions) だけが効いていない`);
+    late.yaws > 0 ? ok(`接続時に yaw も届く (${late.yaws} 通)`) : bad('接続時に yaw が来ない (issue #11)');
+    late.rms > 0.02 ? ok(`★ 途中参加でも音が鳴る (RMS ${late.rms.toFixed(3)})`, `到着順: ${late.order.join(' → ')}`)
+                    : bad('★ 途中参加が無音のまま (issue #11)', `gain ${late.gain} rms ${late.rms} 到着順: ${late.order.join(' → ')}`);
   } catch (e) {
     skip('リレー相手の実地確認', String(e && e.message || e));
   } finally {

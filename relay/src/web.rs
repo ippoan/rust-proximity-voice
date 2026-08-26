@@ -249,6 +249,20 @@ async fn handle_client_msg(st: &WsState, steam_id: &SteamId, msg: ClientMsg) {
             match rx.await {
                 Ok(Ok(sdp)) => {
                     let _ = st.app.hub.send(steam_id, ServerMsg::SdpAnswer { sdp });
+
+                    // 現在の可聴集合と向きを撒き、購読も張り直す (issue #11)。
+                    //
+                    // `graph` は「変化が無ければ送らない」仕様なので、これが無いと
+                    // **途中から接続した人は誰かが動くまで無音**になる。
+                    //
+                    // **★ `Ready` の直後ではなく、ここで呼ぶ。** PWA は `ready` を
+                    // 受け取ってから `sdp_offer` を作るので、`Ready` の時点では
+                    // SFU にこの聞き手のセッションがまだ存在しない。そこで
+                    // `SetSubscriptions` を送っても `セッションが無い` で落ち、
+                    // **ログにエラーが出るだけで症状は無音**になる
+                    // (`Graph` / `Yaw` は Hub 経由なので届いてしまい、
+                    //  「graph は来るのに音が出ない」という切り分けにくい形になる)。
+                    st.app.roster.resync(steam_id);
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(steam_id = %steam_id, error = %e, "offer を受理できない")
