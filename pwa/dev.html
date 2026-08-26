@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>近接VC — 開発モード (距離減衰と定位)</title>
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<main>
+  <h1>開発モード — 距離減衰と定位</h1>
+  <p class="sub">
+    リレーもゲームも無しで、<code>docs/protocol.md</code> §3 の式が実際に鳴る音に載っているかを確かめるページ。
+    本番と同じ <code>PV.AudioEngine</code> の経路 (<code>source → GainNode → StereoPannerNode → destination</code>) を通す。
+  </p>
+
+  <div class="panel">
+    <div class="actions">
+      <button id="start" class="primary">開始</button>
+      <label><span class="pill">音源</span>
+        <select id="source">
+          <option value="tone">合成音 (ループ)</option>
+          <option value="mic">マイク (要 https / localhost・ヘッドホン推奨)</option>
+        </select>
+      </label>
+      <span id="state" class="pill warn">停止中</span>
+    </div>
+    <p class="note" id="hint">AudioContext は user gesture の後でないと鳴らないので、まず「開始」を押す。</p>
+  </div>
+
+  <div class="panel">
+    <h2>入力 (graph / yaw の代わり)</h2>
+    <label class="row"><span>距離 d (m)</span><input id="d" type="range" min="0" max="80" step="0.5" value="10"><output id="dOut"></output></label>
+    <label class="row"><span>世界方位 b (°)</span><input id="b" type="range" min="0" max="355" step="5" value="90"><output id="bOut"></output></label>
+    <label class="row"><span>自分の yaw (°)</span><input id="yaw" type="range" min="0" max="359" step="1" value="0"><output id="yawOut"></output></label>
+    <div class="actions">
+      <button id="sweepD">距離を 0 → 70 に振る</button>
+      <button id="sweepYaw">yaw を 1 周させる</button>
+      <button id="reset">戻す</button>
+    </div>
+    <p class="note">
+      d と b は 2Hz の <code>graph</code>、yaw は 20Hz の <code>yaw</code> として engine に渡している。
+      yaw を動かしたときは <b>pan だけ</b>が再計算される。
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>出力</h2>
+    <table>
+      <tr><th>量</th><th class="num">式の値</th><th class="num">AudioParam の実測</th></tr>
+      <tr><td>gain</td><td class="num" id="gExp"></td><td class="num" id="gAct"></td></tr>
+      <tr><td>pan</td><td class="num" id="pExp"></td><td class="num" id="pAct"></td></tr>
+      <tr><td>相対方位 (b − yaw)</td><td class="num" id="bearing"></td><td class="num" id="lr"></td></tr>
+      <tr><td>可聴 / 購読</td><td class="num" id="audible"></td><td class="num" id="subCell"></td></tr>
+    </table>
+    <p class="note" style="margin-bottom:6px">実測は <code>GainNode.gain.value</code> / <code>StereoPannerNode.pan.value</code> を毎フレーム読んだ値。
+      <code>setTargetAtTime</code> で滑らかに追うので式の値へ少し遅れて着く (プチノイズを出さないため)。</p>
+    <div class="bar" style="margin-top:10px"><i id="gBar"></i></div>
+  </div>
+
+  <div class="panel">
+    <h2>gain(d) の曲線</h2>
+    <canvas id="curve" width="720" height="160"></canvas>
+    <p class="note">縦 = gain (0〜1)、横 = 距離 0〜80m。破線は 5m (減衰開始) と 60m (可聴限界)。丸が今の位置。</p>
+  </div>
+
+  <div class="panel">
+    <h2>式の自己検査</h2>
+    <table id="selftest"></table>
+    <p class="note">docs/protocol.md §3 をそのまま当てた期待値との突き合わせ。1 つでも FAIL なら実装が契約から外れている。</p>
+  </div>
+
+  <p class="note">
+    このページは開発用のシミュレータであり、実データの位置は一切扱わない。
+    本番 UI (<code>index.html</code>) には距離も方位も出さない — 出すと配信画面がそのまま ESP になる。
+  </p>
+</main>
+
+<script src="js/protocol.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/dev.js"></script>
+</body>
+</html>
