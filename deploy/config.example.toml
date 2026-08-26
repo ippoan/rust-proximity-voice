@@ -1,0 +1,58 @@
+# リレーの設定。/opt/voicerelay/config.toml に置く。
+#
+# **このファイルはダミー。実物 (config.toml) は .gitignore 済みで、repo に入れない。**
+# 手順は docs/deploy.md を見る。
+
+# 証明書を取る DNS 名。**必須。** ゲームサーバーの IP に A レコードを 1 本向ける。
+# マイク許可に HTTPS が要るので、IP 直打ちでは動かない。
+domain = "vc.example.com"
+
+# プラグインとの共有シークレット (HMAC-SHA256)。**必須。**
+# Oxide プラグイン側と同じ値にする。合っていないと /internal/* が全部 401 になる。
+#
+# **環境変数 PV_HMAC_SECRET が設定されていれば、そちらが優先される。**
+# 設定ファイルに秘密を置きたくないならここは空のままにして、
+# systemd の EnvironmentFile= (0600) で渡す。
+#   openssl rand -hex 32
+hmac_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# 音声用 UDP ポート。**必須。** ファイアウォールで開けるのはこの 1 本だけでよい
+# (str0m は全トラフィックを 1 つの UDP ソケットに多重化する)。
+udp_port = 40000
+
+# Steam Web API key。省略可。
+# OpenID の検証には要らない。表示名を取りたい場合だけ設定する。
+# https://steamcommunity.com/dev/apikey
+# steam_api_key = "0123456789ABCDEF0123456789ABCDEF"
+
+# 死亡時に音声を失効させるか。省略時 true。
+# ネイティブの Rust が死亡中に聞かせるかは未実測なので、実測するまで true。
+# (docs/protocol.md §0)
+revoke_on_death = true
+
+# 静的 whitelist。省略時は空 = 無効 (プラグインの名簿だけで認可)。
+# 身内限定にする場合だけ、追加のゲートとして重ねる:
+#   認可 = (whitelist に居る) AND (名簿に居る)
+# ゲームサーバー自体に whitelist を掛けているなら要らない。
+whitelist = []
+
+# --- ACME (Let's Encrypt) ---
+
+# 証明書の期限切れ警告の宛先。省略可。`mailto:` は省いてよい。
+# acme_contact = "admin@example.com"
+
+# staging ディレクトリを使うか。省略時 false (= 本番)。
+#
+# **初回のデプロイ検証は true で通すこと。** 本番のレート制限は
+# 「同一ホスト・同一組で 1 時間に 5 失敗」で、DNS や 443 の疎通を間違えると
+# すぐ枯れる。staging の証明書はブラウザに信頼されない (それで正しい) ので、
+# 「証明書が取れた」ログを確認できたら false に戻して再起動する。
+acme_staging = false
+
+# 証明書とアカウント鍵のキャッシュ先。省略時 ".acme-cache" (プロセスの CWD からの相対)。
+# **再起動をまたいで残る場所であること。** 消すと毎回発行しに行き、レート制限に当たる。
+#
+# 既定値はローカル開発用。**本番 (systemd) では下を必ず有効にする。**
+# unit が ProtectSystem=strict なので /opt/voicerelay は read-only で、
+# 書けるのは StateDirectory= が用意する /var/lib/voicerelay だけ。
+acme_cache_dir = "/var/lib/voicerelay/acme-cache"
