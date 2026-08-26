@@ -1,0 +1,96 @@
+# /etc/systemd/system/voicerelay.service
+#
+# 手順は docs/deploy.md。ここは「なぜこの設定なのか」だけ書く。
+
+[Unit]
+Description=Rust proximity voice relay
+Documentation=https://github.com/ippoan/rust-proximity-voice
+# After= だけでは network-online.target が起動されるとは限らない
+# (誰も Wants しなければ target 自体が動かない)。ペアで書くのが systemd の作法。
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+
+# --- root で走らせない ---
+#
+# このプロセスは公開 443 で任意のクライアントから TLS を握り、
+# Steam OpenID と Oxide プラグインからの入力を受ける。攻撃面が広い。
+# 一方で root が要る理由は「443 を bind したい」の 1 点しかない。
+#
+# そこを AmbientCapabilities で切り出す。CAP_NET_BIND_SERVICE は
+# 「1024 未満のポートを bind できる」だけの権能なので、これを非 root に渡すほうが、
+# 全権を持つ root で走らせて自分で権限を落とす (実装を信用する) より狭い。
+# ACME を使うので秘密鍵の読み書きにも root は要らない。
+User=voicerelay
+Group=voicerelay
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# 昇格の上限もここまで。CAP_NET_BIND_SERVICE 以外は最初から持てない。
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+# main.rs が config.toml を**相対パス**で読む。ここは必須。
+WorkingDirectory=/opt/voicerelay
+ExecStart=/opt/voicerelay/voicerelay
+
+Restart=always
+RestartSec=5
+
+# WebRTC のセッションぶんソケットを持つ。既定の 1024 は足りなくなる。
+LimitNOFILE=65535
+
+# 証明書とアカウント鍵。他人に読ませない。
+UMask=0077
+
+# --- hardening ---
+#
+# **ACME キャッシュの書き込みと UDP bind を壊さない範囲に留めてある。**
+# 追加するときは docs/deploy.md 「hardening で足してはいけないもの」を先に読む。
+
+# ファイル系はすべて read-only。**/opt/voicerelay も read-only** なので、
+# プロセスは自分のバイナリも config.toml も書き換えられない。
+ProtectSystem=strict
+
+# 書ける場所は ACME キャッシュ 1 か所だけ。
+#
+# ReadWritePaths= で /opt の下に穴を開けるのではなく StateDirectory= を使う。
+# **systemd が /var/lib/voicerelay を User= の所有で自動作成する**ので、
+# 「mkdir し忘れ / chown し忘れで起動しない」という一番ありがちな事故が起きない。
+# 葉のディレクトリは rustls-acme (DirCache) が create_dir_all で作る。
+#
+# config.toml の acme_cache_dir をここに向けること:
+#   acme_cache_dir = "/var/lib/voicerelay/acme-cache"
+StateDirectory=voicerelay
+StateDirectoryMode=0700
+
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Rust に JIT は無いので W^X を強制できる。
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# AF_NETLINK を落とさないこと。**str0m のローカルアドレス列挙 (getifaddrs) と
+# glibc の名前解決が netlink を使う。** 落とすと ICE candidate が空になり、
+# 「TLS は繋がるのに音声だけ繋がらない」という診断しにくい壊れ方をする。
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
