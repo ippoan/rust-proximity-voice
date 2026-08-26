@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# 注意: rust-alc-api にある "PR Limit Check" は **意図的に入れていない**。
+# この repo は所有権を分けた 4〜5 本の並列タスクが同時に PR を出す設計なので、
+# 「作者あたり open PR 1 本」の gate を入れると全部が詰まる。
+
+jobs:
+  check:
+    name: Format & Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --check --all
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+
+  # 絶対座標を送っていないことの機械検査。docs/protocol.md の安全要件で、
+  # レビューで見落とすと ESP ツールの配布になる。
+  no-absolute-coords:
+    name: No Absolute Coords
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 送信 JSON に座標フィールドが無いこと
+        run: |
+          set -euo pipefail
+          # ワイヤ形式を定義している場所だけを見る (誤検知の面積を絞る)。
+          # 座標は距離と方位の計算に使ってよいが、送信 JSON に載せてはいけない。
+          if grep -rnE '"(pos|position|coord[s]?|world_pos)"' \
+               --include='*.cs' plugin/ 2>/dev/null \
+             || grep -nE '"(pos|position|coord[s]?)"' relay/src/proto.rs 2>/dev/null; then
+            echo "::error::送信 JSON に絶対座標らしきキーがある。docs/protocol.md の安全要件違反"
+            exit 1
+          fi
+          echo "OK: 絶対座標のキーは見つからなかった"
+
+  auto-merge:
+    name: Auto Merge
+    needs: [check, no-absolute-coords]
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      needs.check.result == 'success' &&
+      needs.no-absolute-coords.result == 'success'
+    uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+      # caller 側が checks: read を許可しないと startup_failure になる
+      # (Refs ippoan/ci-workflows#169)
+      checks: read
+    secrets: inherit

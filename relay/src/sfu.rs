@@ -4,7 +4,25 @@
 //! スロットプール方式 (docs/protocol.md) により、可聴集合が変わっても
 //! 再ネゴシエーションを起こさないこと。
 
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
 use crate::proto::{ServerMsg, SteamId};
+use crate::signal::Hub;
+use crate::state::SfuCommand;
+
+/// SFU のループ。**`Sfu` はここが単独で所有する** (Mutex で包まない)。
+/// 指令は `rx` から受け、クライアントへ送るメッセージは `hub` 経由で出す
+/// (ICE candidate など、こちら発のものを含む)。
+///
+/// **担当: #1-1。** シグネチャは親所有 (`state.rs` と対) なので変更しない。
+pub async fn run(
+    _udp_port: u16,
+    _rx: mpsc::Receiver<SfuCommand>,
+    _hub: Arc<Hub>,
+) -> anyhow::Result<()> {
+    todo!("#1-1: UDP 1 ソケットを bind し、指令を処理しつつ RTP を転送する")
+}
 
 /// 1 セッション = 1 ブラウザ。接続時に `SLOTS` 本の受信スロットを張る。
 pub struct Session {

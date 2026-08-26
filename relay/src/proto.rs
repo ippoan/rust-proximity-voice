@@ -88,17 +88,35 @@ pub enum ClientMsg {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ServerMsg {
-    Ready { steam_id: SteamId, server_id: ServerId },
-    SdpAnswer { sdp: String },
-    Ice { candidate: serde_json::Value },
+    Ready {
+        steam_id: SteamId,
+        server_id: ServerId,
+    },
+    SdpAnswer {
+        sdp: String,
+    },
+    Ice {
+        candidate: serde_json::Value,
+    },
     /// スロットの割り当て / 解放。`id: None` は解放
-    Peer { mid: String, id: Option<SteamId> },
-    Graph { hears: Vec<Heard> },
+    Peer {
+        mid: String,
+        id: Option<SteamId>,
+    },
+    Graph {
+        hears: Vec<Heard>,
+    },
     /// 聞き手自身の向き。`YAW_HZ` で流れる
-    Yaw { deg: u16 },
+    Yaw {
+        deg: u16,
+    },
     /// 自分の PTT 状態
-    Talk { on: bool },
-    Bye { reason: ByeReason },
+    Talk {
+        on: bool,
+    },
+    Bye {
+        reason: ByeReason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

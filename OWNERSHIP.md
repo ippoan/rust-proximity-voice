@@ -5,7 +5,7 @@
 
 | 担当 | 所有するファイル |
 |---|---|
-| **親 (#p1)** | `README.md` `OWNERSHIP.md` `docs/protocol.md` `Cargo.toml` `relay/Cargo.toml` `relay/src/main.rs` `relay/src/proto.rs` |
+| **親 (#p1)** | `README.md` `OWNERSHIP.md` `docs/protocol.md` `Cargo.toml` `relay/Cargo.toml` `relay/src/main.rs` `relay/src/lib.rs` `relay/src/proto.rs` `relay/src/state.rs` |
 | **#1-1 リレー SFU** | `relay/src/sfu.rs` `relay/src/signal.rs` `relay/src/web.rs` |
 | **#1-2 PWA** | `pwa/**` |
 | **#1-3 認証・名簿** | `relay/src/auth.rs` `relay/src/roster.rs` |
@@ -16,6 +16,12 @@
 
 `relay/Cargo.toml` は親の所有だが、**依存の追加だけは各タスクが `cargo add` してよい**。
 既存の依存のバージョンを変更しないこと。追加した依存は `[完了]` に書く。
+
+## 検証用サーバー
+
+`relay/src/lib.rs` の `build(cfg)` が本番と共通の入口。`examples/` や `tests/` から
+これを呼べば、`main` を経由せずに `Config` を差し替えて起動できる
+(本番の `Config::load` は #1-5 が実装中で `todo!()` のため)。
 
 ## 結線
 

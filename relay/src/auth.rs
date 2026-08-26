@@ -9,7 +9,9 @@
 //! トークンは HttpOnly Cookie で渡す。
 
 use axum::Router;
+
 use crate::proto::SteamId;
+use crate::state::AppState;
 
 /// Steam OpenID の戻りを検証して SteamID64 を得る。
 pub async fn verify_steam_openid(_query: &str) -> anyhow::Result<SteamId> {
@@ -36,6 +38,6 @@ pub fn require_session(_cookie: &str) -> anyhow::Result<SteamId> {
 
 /// このモジュールが提供する route。**#1-3 が中身を実装する。**
 /// `web.rs` (#1-1) が `router()` の中で merge する。空でも #1-1 は独立にビルドできる。
-pub fn routes() -> Router {
+pub fn routes(_st: AppState) -> Router {
     Router::new()
 }
