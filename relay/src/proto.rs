@@ -43,9 +43,18 @@ pub struct GraphPush {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Listener {
     pub id: SteamId,
-    /// 聞き手自身の向き (度, 0-355)。`YAW_HZ` で更新される
-    pub yaw: u16,
     pub hears: Vec<Heard>,
+}
+
+/// 聞き手の向きだけを高レートで運ぶ。**graph とは別便**
+/// (graph は `GRAPH_HZ`=2 かつ変化時のみ、yaw は `YAW_HZ`=20)。
+/// 1 リクエストに全聞き手ぶんを詰める (1 tick = 1 POST)。
+#[derive(Debug, Clone, Deserialize)]
+pub struct YawPush {
+    pub server_id: ServerId,
+    pub ts: i64,
+    /// (SteamID, 度 0-355)
+    pub yaws: Vec<(SteamId, u16)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

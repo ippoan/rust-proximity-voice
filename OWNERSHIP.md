@@ -5,12 +5,12 @@
 
 | 担当 | 所有するファイル |
 |---|---|
-| **親 (#p1)** | `README.md` `OWNERSHIP.md` `docs/protocol.md` `Cargo.toml` `relay/Cargo.toml` `relay/src/main.rs` `relay/src/proto.rs` `relay/src/config.rs` |
+| **親 (#p1)** | `README.md` `OWNERSHIP.md` `docs/protocol.md` `Cargo.toml` `relay/Cargo.toml` `relay/src/main.rs` `relay/src/proto.rs` |
 | **#1-1 リレー SFU** | `relay/src/sfu.rs` `relay/src/signal.rs` `relay/src/web.rs` |
 | **#1-2 PWA** | `pwa/**` |
 | **#1-3 認証・名簿** | `relay/src/auth.rs` `relay/src/roster.rs` |
 | **#1-4 Oxide プラグイン** | `plugin/**` |
-| **#1-5 デプロイ** | `deploy/**` `docs/deploy.md` |
+| **#1-5 デプロイ** | `deploy/**` `docs/deploy.md` `relay/src/config.rs` |
 
 ## 依存の追加
 

@@ -124,6 +124,14 @@ X-PV-Signature: <hex(hmac_sha256(secret, timestamp + "." + body))>
 `sub: false` になった相手は、リレーが RTP 転送を止める。**購読していないことが唯一の保証**であり、
 「購読したまま gain 0」は禁止（改造クライアントが gain を戻せる）。
 
+### `POST /internal/yaw`
+
+`YAW_HZ` = 20 で送る。**graph とは別便**。1 tick = 1 リクエストに全聞き手ぶんを詰める。
+
+```json
+{ "server_id": "main", "ts": 1756180000, "yaws": [["76561198000000001", 145]] }
+```
+
 ### `POST /internal/talk`
 
 PTT の状態変化。押下・離しの都度、即時に送る。

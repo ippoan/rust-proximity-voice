@@ -8,6 +8,7 @@
 //! **画面に秘密を出さない。** ペアリングコードもトークン付きリンクも使わない。
 //! トークンは HttpOnly Cookie で渡す。
 
+use axum::Router;
 use crate::proto::SteamId;
 
 /// Steam OpenID の戻りを検証して SteamID64 を得る。
@@ -31,4 +32,10 @@ pub fn verify_hmac(
 /// Cookie のトークンからセッションを引く。
 pub fn require_session(_cookie: &str) -> anyhow::Result<SteamId> {
     todo!("#1-3")
+}
+
+/// このモジュールが提供する route。**#1-3 が中身を実装する。**
+/// `web.rs` (#1-1) が `router()` の中で merge する。空でも #1-1 は独立にビルドできる。
+pub fn routes() -> Router {
+    Router::new()
 }

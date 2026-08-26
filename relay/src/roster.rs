@@ -5,6 +5,7 @@
 //!   (fail closed)。**切断はしない**
 //! - `revoke_on_death` は Config を見る
 
+use axum::Router;
 use crate::proto::{GraphPush, Heard, RosterPush, ServerId, SteamId, TalkPush};
 
 pub struct Roster {}
@@ -41,4 +42,10 @@ impl Default for Roster {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// このモジュールが提供する route。**#1-3 が中身を実装する。**
+/// `web.rs` (#1-1) が `router()` の中で merge する。空でも #1-1 は独立にビルドできる。
+pub fn routes() -> Router {
+    Router::new()
 }
