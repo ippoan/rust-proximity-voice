@@ -46,6 +46,12 @@ pub enum SfuCommand {
     /// その聞き手への **RTP 転送を止めるだけ**。**切断しない**
     /// (死亡・roster TTL 切れ。docs/protocol.md §0)
     MuteAll { listener: SteamId },
-    /// セッションの終了 (二重接続・BAN・shutdown のときだけ)
-    Disconnect { steam_id: SteamId },
+    /// セッションの終了 (二重接続・BAN・shutdown のときだけ)。
+    ///
+    /// **`ServerMsg::Bye` を送って WS を閉じるのは受け手 (`sfu::run` / `Hub`) の責務。**
+    /// 呼び出し側は `Bye` を流さない。`Peer` と同じく送出元を 1 箇所に寄せる。
+    Disconnect {
+        steam_id: SteamId,
+        reason: crate::proto::ByeReason,
+    },
 }
