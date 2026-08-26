@@ -1,0 +1,199 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>近接VC リレー — 検証用クライアント</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; }
+  button { font: inherit; padding: .4rem .9rem; margin-right: .5rem; }
+  input { font: inherit; padding: .3rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { border: 1px solid #ccc; padding: .25rem .5rem; text-align: left; font-variant-numeric: tabular-nums; }
+  th { background: #f4f4f4; font-weight: 600; }
+  td.free { color: #999; }
+  #log { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px;
+         background: #111; color: #ddd; padding: .75rem; height: 16rem; overflow: auto; margin-top: 1rem; }
+  .note { color: #555; }
+</style>
+
+<h1>近接VC リレー — 検証用クライアント</h1>
+<p class="note">
+  本番の PWA (<code>pwa/</code>, #1-2) ではない。SFU とシグナリングだけを確かめるための最小実装。
+  マイク 1 本 + 受信スロット <span id="slots-n"></span> 本を <b>offer 側で並べて</b>、
+  以後は再ネゴシエーションしない。
+</p>
+
+<p>
+  自分: <b id="me"></b>
+  <button id="connect">接続してマイクを送る</button>
+</p>
+
+<p>
+  聞く相手 (カンマ区切り、<b>近い順</b>):
+  <input id="speakers" size="30" placeholder="bob">
+  <button id="subscribe">購読を差し替える</button>
+  <button id="mute">全部止める (mute_all)</button>
+</p>
+
+<table>
+  <thead><tr><th style="width:5rem">mid</th><th>割り当てられた相手</th><th style="width:8rem">音</th></tr></thead>
+  <tbody id="slots"></tbody>
+</table>
+
+<div id="log"></div>
+
+<script>
+const SLOTS = 16;
+document.getElementById('slots-n').textContent = SLOTS;
+
+const params = new URLSearchParams(location.search);
+const me = params.get('steam_id') || 'anonymous';
+document.getElementById('me').textContent = me;
+
+const logEl = document.getElementById('log');
+function log(...a) {
+  const line = a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' ');
+  logEl.textContent += line + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+let ws, pc;
+/** mid -> { row, audio, level } */
+const slotRows = new Map();
+
+function ensureRow(mid) {
+  let entry = slotRows.get(mid);
+  if (entry) return entry;
+
+  const row = document.createElement('tr');
+  const tdMid = document.createElement('td');
+  tdMid.textContent = mid;
+  const tdWho = document.createElement('td');
+  tdWho.className = 'free';
+  tdWho.textContent = '(空き)';
+  const tdLevel = document.createElement('td');
+  tdLevel.textContent = '–';
+  row.append(tdMid, tdWho, tdLevel);
+  document.getElementById('slots').append(row);
+
+  const audio = document.createElement('audio');
+  audio.autoplay = true;
+  document.body.append(audio);
+
+  entry = { row, who: tdWho, level: tdLevel, audio };
+  slotRows.set(mid, entry);
+  return entry;
+}
+
+async function connect() {
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?steam_id=${encodeURIComponent(me)}`);
+  ws.onopen = () => { log('ws open'); ws.send(JSON.stringify({ t: 'hello', v: 1 })); };
+  ws.onclose = () => log('ws closed');
+  ws.onmessage = (ev) => onServerMsg(JSON.parse(ev.data));
+}
+
+async function negotiate() {
+  pc = new RTCPeerConnection();
+
+  pc.oniceconnectionstatechange = () => log('ice:', pc.iceConnectionState);
+  pc.onconnectionstatechange = () => log('pc:', pc.connectionState);
+
+  const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+  // ★ m-line を並べるのは offer 側。先頭がマイク、以降が受信スロット。
+  //    answer では m-line を増やせないので、ここで全部並べておく。
+  pc.addTransceiver(mic.getAudioTracks()[0], { direction: 'sendonly' });
+  for (let i = 0; i < SLOTS; i++) pc.addTransceiver('audio', { direction: 'recvonly' });
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await iceGatheringDone(pc);   // trickle を使わず 1 発で送る (検証用の簡略化)
+
+  log(`offer を送る (m-line ${pc.getTransceivers().length} 本)`);
+  ws.send(JSON.stringify({ t: 'sdp_offer', sdp: pc.localDescription.sdp }));
+}
+
+function iceGatheringDone(pc) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise(res => {
+    const check = () => { if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', check); res(); } };
+    pc.addEventListener('icegatheringstatechange', check);
+  });
+}
+
+async function onServerMsg(msg) {
+  switch (msg.t) {
+    case 'ready':
+      log('ready', msg.steam_id, '@', msg.server_id);
+      await negotiate();
+      break;
+
+    case 'sdp_answer': {
+      await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      log('answer を受けた。以後 再ネゴシエーションはしない');
+      // 受信スロットのトラックを、mid ごとに <audio> へ張る。
+      // 割り当てが変わっても張り替えない — mid は固定で、中身だけが差し替わる。
+      for (const t of pc.getTransceivers()) {
+        if (!t.mid || t.receiver.track.kind !== 'audio') continue;
+        if (t.currentDirection === 'sendonly' || t.direction === 'sendonly') continue;
+        const entry = ensureRow(t.mid);
+        entry.audio.srcObject = new MediaStream([t.receiver.track]);
+        watchLevel(t, entry);
+      }
+      break;
+    }
+
+    case 'peer': {
+      // ★ スロットの割り当て / 解放。ここで再ネゴシエーションは起きない
+      const entry = ensureRow(msg.mid);
+      if (msg.id) {
+        entry.who.textContent = msg.id;
+        entry.who.className = '';
+      } else {
+        entry.who.textContent = '(空き)';
+        entry.who.className = 'free';
+      }
+      log('peer', msg.mid, '→', msg.id ?? 'null');
+      break;
+    }
+
+    case 'bye':
+      log('bye:', msg.reason);
+      ws.close();
+      break;
+
+    default:
+      log('recv', msg);
+  }
+}
+
+/** そのスロットに実際に音が届いているかを、10 Hz で見えるようにする。 */
+function watchLevel(transceiver, entry) {
+  let last = { bytes: 0, at: performance.now() };
+  setInterval(async () => {
+    const stats = await transceiver.receiver.getStats();
+    let bytes = 0;
+    stats.forEach(r => { if (r.type === 'inbound-rtp') bytes += r.bytesReceived || 0; });
+    const now = performance.now();
+    const kbps = ((bytes - last.bytes) * 8) / (now - last.at);
+    last = { bytes, at: now };
+    entry.level.textContent = kbps > 0.5 ? `▮ ${kbps.toFixed(0)} kbps` : '–';
+  }, 500);
+}
+
+async function post(path, body) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  log(path, '→', await r.text());
+}
+
+document.getElementById('connect').onclick = () => connect().catch(e => log('error:', String(e)));
+document.getElementById('subscribe').onclick = () => {
+  const speakers = document.getElementById('speakers').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+  post('/dev/subscribe', { listener: me, speakers });
+};
+document.getElementById('mute').onclick = () => post('/dev/mute', { listener: me });
+</script>
