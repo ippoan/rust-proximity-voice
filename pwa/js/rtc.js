@@ -22,6 +22,7 @@ window.PV = window.PV || {};
     this.opts = opts || {};
     this.pc = null;
     this.micSender = null;
+    this.micTrack = null;
     this.pendingIce = [];
     this.remoteSet = false;
     this.slotMids = [];
@@ -44,13 +45,12 @@ window.PV = window.PV || {};
     // ontrack は使わない。setRemoteDescription の直後に mid ごとに張るほうが、
     // スロットの割り当てが切り替わっても Web Audio のノードが既に揃っていて音が途切れない。
 
-    // ★ マイクは必ず先頭。SLOTS を将来変えてもマイクの mid が動かない
+    // ★ マイクは必ず先頭。SLOTS を将来変えてもマイクの mid が動かない。
+    //    ネゴシエーションの時点では実トラックを付けておく (relay/examples/index.html と同じ形)。
+    //    実際の送信の入り切りは answer 後の replaceTrack でやる — 再ネゴシエーションは起きない
     var micTx = pc.addTransceiver(micTrack || 'audio', { direction: 'sendonly' });
     this.micSender = micTx.sender;
-    if (!micTrack) {
-      // talk on を受けるまでは 1 バイトも送らない。replaceTrack は再ネゴシエーションを起こさない
-      try { micTx.sender.replaceTrack(null); } catch (e) {}
-    }
+    this.micTrack = micTrack || null;
     for (var i = 0; i < PV.SLOTS; i++) pc.addTransceiver('audio', { direction: 'recvonly' });
 
     return pc.createOffer()
@@ -98,10 +98,13 @@ window.PV = window.PV || {};
     this.pc.addIceCandidate(candidate).catch(function (e) { console.warn('[rtc] addIceCandidate', e); });
   };
 
-  /** マイクの送信を入れる / 止める。**再ネゴシエーションは起きない** */
-  Rtc.prototype.setMicTrack = function (track) {
+  /**
+   * マイクの送信を入れる / 止める。**再ネゴシエーションは起きない。**
+   * off の間は sender にトラックが無いので、1 バイトも出て行かない。
+   */
+  Rtc.prototype.setMicEnabled = function (on) {
     if (!this.micSender) return Promise.resolve();
-    return this.micSender.replaceTrack(track || null);
+    return this.micSender.replaceTrack(on ? this.micTrack : null);
   };
 
   Rtc.prototype.close = function () {

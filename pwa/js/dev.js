@@ -11,6 +11,9 @@
 
   var $ = function (id) { return document.getElementById(id); };
   var engine = new PV.AudioEngine();
+  // pwa/verify.mjs (headless Chrome) から AudioParam の実測値を読むための口。
+  // 開発ページ専用 — index.html では出さない
+  window.__engine = engine;
   var running = false;
   var srcNode = null;
   var micStream = null;

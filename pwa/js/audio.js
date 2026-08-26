@@ -192,7 +192,15 @@ window.PV = window.PV || {};
   AudioEngine.prototype._applySlot = function (s) {
     var t = this.ctx.currentTime;
     var m = PV.mix(s.d, s.bWorld, this.yaw);
-    s.gain.gain.setTargetAtTime(m.gain, t, GAIN_TAU);
+    var g = s.gain.gain;
+    // 前回ぶんの予約 (下の「本当に 0 にする」) を消してから当て直す。
+    // 消さないと、可聴範囲へ戻ってきた直後に予約が発火して音が切れる
+    g.cancelScheduledValues(t);
+    g.setTargetAtTime(m.gain, t, GAIN_TAU);
+    // setTargetAtTime は指数で近づくだけで 0 には**到達しない**。
+    // 可聴範囲外は「小さい音」ではなく無音でなければならないので、
+    // 十分減衰したところ (6τ ≒ -52dB) で 0 を予約して止める
+    if (m.gain === 0) g.setValueAtTime(0, t + GAIN_TAU * 6);
     s.pan.pan.setTargetAtTime(m.pan, t, PAN_TAU);
   };
 

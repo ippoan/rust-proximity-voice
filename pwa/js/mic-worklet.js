@@ -17,6 +17,7 @@ class MicRingProcessor extends AudioWorkletProcessor {
     this.read = 0;      // 総読み出しサンプル数 (絶対位置)。送信中だけ進む
     this.sending = false;
     this.draining = false;
+    this.drainTarget = 0;
     // 遡り量。サーバー往復 (50〜100ms) を吸えるだけ遡る。バッファ長より必ず短くする
     this.lookback = Math.min(
       Math.round(sampleRate * (o.lookbackMs || 150) / 1000),
@@ -34,8 +35,11 @@ class MicRingProcessor extends AudioWorkletProcessor {
         this.draining = false;
         this.port.postMessage({ t: 'started', lookbackMs: (back / sampleRate) * 1000 });
       } else if (m.t === 'stop') {
-        // ここで即座に止めると、遡ったぶんだけ末尾が落ちる。溜まりを吐き切ってから止める
+        // ここで即座に止めると、遡ったぶんだけ末尾が落ちる。溜まりを吐き切ってから止める。
+        // 目標は「stop を受けた時点までに録れていたぶん」。以後に入ってくる音は
+        // もう PTT を離した後の環境音なので送らない
         if (!this.sending) { this.port.postMessage({ t: 'drained' }); return; }
+        this.drainTarget = this.written;
         this.draining = true;
       }
     };
@@ -69,7 +73,8 @@ class MicRingProcessor extends AudioWorkletProcessor {
 
     // 2. 追いつき: 遡ったぶんの遅延を、無音区間を捨てて詰める。
     //    音の出ている区間は絶対に捨てない (話者が早口になるより、少し遅れるほうがよい)
-    if (this.written - this.read > n && this._peak(this.read, n) < this.silence) {
+    // 1 quantum 飛ばしても読み出し位置が書き込みを追い越さないよう、2 quantum ぶん残す
+    if (this.written - this.read >= 2 * n && this._peak(this.read, n) < this.silence) {
       this.read += n;
     }
 
@@ -80,7 +85,7 @@ class MicRingProcessor extends AudioWorkletProcessor {
     }
     this.read += n;
 
-    if (this.draining && this.read >= this.written) {
+    if (this.draining && this.read >= this.drainTarget) {
       this.sending = false;
       this.draining = false;
       this.port.postMessage({ t: 'drained' });

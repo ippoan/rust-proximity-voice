@@ -1,0 +1,18 @@
+{
+  "id": "/",
+  "name": "近接ボイスチャット",
+  "short_name": "近接VC",
+  "description": "Rust サーバー向けの近接ボイスチャット。ゲーム内の距離と向きに合わせて声が聞こえる。",
+  "lang": "ja",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#14161a",
+  "theme_color": "#14161a",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
