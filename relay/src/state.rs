@@ -53,6 +53,7 @@ pub enum SfuCommand {
     /// `SfuCommand` を経由しない:
     ///   - `DuplicateSession` … `Hub::register` の中で完結
     ///   - `ServerShutdown`   … `Hub::kick_all` の中で完結
+    ///
     /// `roster.rs` は `Disconnect` を 1 回も送らない (管理者 BAN で WS を切る機能は
     /// docs/protocol.md で意図的に実装しないと決めたため)。
     ///
