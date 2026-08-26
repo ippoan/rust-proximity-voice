@@ -17,6 +17,7 @@ import { createServer } from 'node:http';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize } from 'node:path';
 
@@ -24,6 +25,9 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const results = [];
 const ok = (name, extra = '') => { results.push([true, name, extra]); console.log(`  ok   ${name}${extra ? '  ' + extra : ''}`); };
 const bad = (name, extra = '') => { results.push([false, name, extra]); console.log(`  FAIL ${name}${extra ? '  ' + extra : ''}`); };
+// 環境が揃わなくて**確認できなかった**もの。FAIL とは区別する (埋めたふりをしない)
+const skipped = [];
+const skip = (name, why) => { skipped.push([name, why]); console.log(`  skip ${name}  — ${why}`); };
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
 
 // ---------------------------------------------------------------- A-1 式
@@ -444,6 +448,189 @@ try {
   bad('WebRTC ループバック', String(e && e.message || e));
 }
 
+// --- D. 本物のリレー相手 (relay/examples/dev_relay) ------------------------
+// C はリレーの代役を同じページに書いたものなので、「代役が実物と違っていた」箇所は
+// 出てこない。ここは #1-1 の dev_relay を実際に立てて、signal.js が本物の
+// hello / sdp_answer / peer / bye を受け取れるかを見る。
+//
+// HTTP は 127.0.0.1 に bind する (dev_relay の既定)。立たなければ FAIL ではなく skip。
+console.log('\nD. リレー (relay/examples/dev_relay) 相手の実地確認');
+{
+  const freePort = () => new Promise(res => {
+    const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
+  });
+  const HTTP_PORT = await freePort();
+  const UDP_PORT = await freePort();
+  const SECRET = 'dev', SERVER_ID = 'dev';
+  const HTTP = `http://127.0.0.1:${HTTP_PORT}`;
+  let seq = 1;
+  const internal = async (path, body) => {
+    const payload = JSON.stringify({ server_id: SERVER_ID, seq: seq++, ts: Math.floor(Date.now() / 1000), ...body });
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = createHmac('sha256', SECRET).update(`${ts}.${payload}`).digest('hex');
+    const r = await fetch(HTTP + path, { method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-PV-Timestamp': ts, 'X-PV-Signature': sig }, body: payload });
+    return `${r.status} ${await r.text()}`;
+  };
+  const dev = (path, body) => fetch(HTTP + path, { method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.text());
+
+  let relay = null, keepalive = null, relayPage = null;
+  try {
+    relay = spawn('cargo', ['run', '-q', '-p', 'relay', '--example', 'dev_relay'], {
+      cwd: join(ROOT, '..'),
+      env: { ...process.env, PV_HTTP_PORT: String(HTTP_PORT), PV_UDP_PORT: String(UDP_PORT), PV_HMAC_SECRET: SECRET },
+      stdio: 'ignore'
+    });
+    let up = false;
+    for (let i = 0; i < 120 && !up; i++) {
+      try { up = (await fetch(HTTP + '/')).ok; } catch {}
+      if (!up) await new Promise(r => setTimeout(r, 500));
+    }
+    if (!up) throw new Error(`dev_relay が ${HTTP} で応答しない`);
+    ok(`dev_relay が 127.0.0.1:${HTTP_PORT} で起動 (UDP ${UDP_PORT})`);
+
+    const WS = `ws://127.0.0.1:${HTTP_PORT}/ws`;
+    relayPage = await Cdp.open(`${base}/index.html`);
+    for (let i = 0; i < 100; i++) {
+      if (await relayPage.eval(`document.readyState === 'complete' && !!(window.PV && PV.Rtc)`)) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    // D-1. 名簿に載っていない相手は bye: not_eligible で断られる。
+    //      #1-1 はリレー側から見た同じ経路を確認済みだが、**ブラウザ側がどう受け取るか**は未確認だった
+    const denied = await relayPage.eval(`(async () => {
+      const sig = new PV.Signal(${JSON.stringify(WS + '?steam_id=nobody')});
+      const got = new Promise(res => { sig.on('bye', m => res(m.reason)); setTimeout(() => res('(来なかった)'), 12000); });
+      sig.open();
+      const reason = await got;
+      return { reason, wantOpen: sig.wantOpen };
+    })()`);
+    denied.reason === 'not_eligible' ? ok('名簿に無い相手は bye: not_eligible で断られる') : bad('bye の reason', denied.reason);
+    denied.wantOpen === false ? ok('not_eligible では signal.js が再接続を諦める') : bad('not_eligible なのに再接続しようとする');
+
+    // D-2. 名簿に載せて 2 人ぶん繋ぐ
+    const pushed = await internal('/internal/roster', { eligible: ['alice', 'bob'] });
+    // 成功は 204 No Content (本文を返さない)。2xx なら通っている
+    /^2\d\d/.test(pushed) ? ok(`POST /internal/roster (HMAC 付き) が通る (${pushed.trim()})`) : bad('roster push', pushed);
+    // ROSTER_TTL_S = 10 で切られるので、試験中は push し続ける
+    keepalive = setInterval(() => { internal('/internal/roster', { eligible: ['alice', 'bob'] }).catch(() => {}); }, 2500);
+
+    const setup = await relayPage.eval(`(async () => {
+      window.__c = {};
+      const toneCtx = new AudioContext();
+      const tone = (hz) => { const d = toneCtx.createMediaStreamDestination();
+        const o = toneCtx.createOscillator(); o.frequency.value = hz;
+        const g = toneCtx.createGain(); g.gain.value = 0.6; o.connect(g); g.connect(d); o.start();
+        return d.stream.getAudioTracks()[0]; };
+      const client = async (id, hz) => {
+        const engine = new PV.AudioEngine(); await engine.start();
+        const sig = new PV.Signal(${JSON.stringify(WS)} + '?steam_id=' + id);
+        const rtc = new PV.Rtc(engine, sig);
+        const peers = [];
+        sig.on('ready', () => rtc.negotiate(tone(hz)).catch(e => peers.push({ err: String(e) })));
+        sig.on('sdp_answer', m => rtc.onAnswer(m.sdp).then(() => rtc.setMicEnabled(true)));
+        sig.on('ice', m => rtc.onIce(m.candidate));
+        sig.on('peer', m => { peers.push({ mid: m.mid, id: m.id }); engine.setPeer(m.mid, m.id); });
+        sig.open();
+        return { engine, sig, rtc, peers };
+      };
+      window.__c.alice = await client('alice', 440);
+      window.__c.bob = await client('bob', 330);
+      const wait = async (f, ms) => { const t0 = Date.now();
+        while (Date.now() - t0 < ms) { if (f()) return true; await new Promise(r => setTimeout(r, 100)); } return false; };
+      const conn = await wait(() => ['alice','bob'].every(k => window.__c[k].rtc.pc && window.__c[k].rtc.pc.connectionState === 'connected'), 25000);
+      return { connected: conn,
+               states: ['alice','bob'].map(k => window.__c[k].rtc.pc && window.__c[k].rtc.pc.connectionState),
+               slotMids: window.__c.alice.rtc.slotMids.length,
+               signaling: window.__c.alice.rtc.pc.signalingState };
+    })()`);
+    setup.connected ? ok('本物のリレー相手に 2 人とも PeerConnection が繋がる') : bad('繋がらない', JSON.stringify(setup.states));
+    setup.slotMids === PV.SLOTS ? ok(`answer 直後に ${PV.SLOTS} 本のスロットを張れている (実物の answer で)`)
+                                : bad('スロット数', String(setup.slotMids));
+
+    // D-3. 購読前は 1 バイトも来ない
+    const before = await relayPage.eval(`(async () => {
+      let total = 0;
+      const stats = await window.__c.alice.rtc.pc.getStats();
+      stats.forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio') total += r.bytesReceived || 0; });
+      return { bytes: total, peers: window.__c.alice.peers.length };
+    })()`);
+    before.bytes === 0 ? ok('購読前は 1 バイトも届かない') : bad('購読していないのに届いている', String(before.bytes));
+    before.peers === 0 ? ok('購読前は peer が来ない') : bad('購読前に peer が来た', JSON.stringify(before.peers));
+
+    // D-4. 購読させると peer が来て、実際に音が鳴る
+    await dev('/dev/subscribe', { listener: 'alice', speakers: ['bob'] });
+    const heard = await relayPage.eval(`(async () => {
+      const a = window.__c.alice;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 10000 && !a.peers.some(p => p.id === 'bob')) await new Promise(r => setTimeout(r, 100));
+      const p = a.peers.find(x => x.id === 'bob');
+      if (!p) return { assigned: false, peers: a.peers };
+      a.engine.applyGraph([{ id: 'bob', d: 2, b: 90, sub: true }]);
+      const slot = a.engine.slots[p.mid];
+      let peak = 0;
+      for (let i = 0; i < 60; i++) { await new Promise(r => setTimeout(r, 50));
+        const b = new Float32Array(slot.analyser.fftSize); slot.analyser.getFloatTimeDomainData(b);
+        let s = 0; for (const v of b) s += v * v; peak = Math.max(peak, Math.sqrt(s / b.length)); }
+      return { assigned: true, mid: p.mid, rms: peak, pan: slot.pan.pan.value,
+               muted: !!(slot.audioEl && slot.audioEl.muted),
+               signaling: a.rtc.pc.signalingState, slotMids: a.rtc.slotMids.slice() };
+    })()`);
+    heard.assigned ? ok(`購読すると peer が来てスロットが割り当たる (mid "${heard.mid}")`)
+                   : bad('peer が来ない', JSON.stringify(heard.peers));
+    heard.rms > 0.02 ? ok(`実物のリレー越しに音が Web Audio へ届く (RMS ${heard.rms.toFixed(3)})`)
+                     : bad('リレー越しの音が届かない', String(heard.rms));
+    heard.muted ? ok('リモートトラックが muted な <audio> にもアタッチされている') : bad('罠回避の <audio> が無い');
+    Math.abs(heard.pan - 1) < 0.05 ? ok(`定位が当たっている (pan ${heard.pan.toFixed(3)})`) : bad('pan', String(heard.pan));
+
+    // D-5. mute_all: 転送だけ止まる。スロットも mid も PeerConnection も動かない
+    const midsBefore = heard.slotMids;
+    await dev('/dev/mute', { listener: 'alice' });
+    const muted = await relayPage.eval(`(async () => {
+      const a = window.__c.alice;
+      const n = a.peers.length;
+      await new Promise(r => setTimeout(r, 2500));
+      const slot = a.engine.slots[${JSON.stringify(heard.mid)}];
+      let peak = 0;
+      for (let i = 0; i < 30; i++) { await new Promise(r => setTimeout(r, 50));
+        const b = new Float32Array(slot.analyser.fftSize); slot.analyser.getFloatTimeDomainData(b);
+        let s = 0; for (const v of b) s += v * v; peak = Math.max(peak, Math.sqrt(s / b.length)); }
+      return { rms: peak, newPeers: a.peers.slice(n), conn: a.rtc.pc.connectionState,
+               signaling: a.rtc.pc.signalingState, slotMids: a.rtc.slotMids.slice(),
+               steamId: slot.steamId };
+    })()`);
+    muted.rms < 0.02 ? ok(`mute_all で音が止まる (RMS ${muted.rms.toFixed(4)})`) : bad('mute_all でも鳴っている', String(muted.rms));
+    muted.newPeers.length === 0 ? ok('mute_all では Peer{id:null} が撒かれない (スロットは保持)')
+                                : bad('mute_all でスロットが動いた', JSON.stringify(muted.newPeers));
+    muted.steamId === 'bob' ? ok('mid ↔ SteamID の対応が保たれている') : bad('対応が外れた', String(muted.steamId));
+    muted.conn === 'connected' && muted.signaling === 'stable' && JSON.stringify(muted.slotMids) === JSON.stringify(midsBefore)
+      ? ok('mute_all で PeerConnection も mid も動かない (再ネゴシエーションなし)')
+      : bad('mute_all で接続が動いた', `${muted.conn}/${muted.signaling}`);
+
+    // D-6. 購読を戻すと鳴り出す (死亡 → リスポーンの形)
+    await dev('/dev/subscribe', { listener: 'alice', speakers: ['bob'] });
+    const back = await relayPage.eval(`(async () => {
+      const a = window.__c.alice;
+      const slot = a.engine.slots[${JSON.stringify(heard.mid)}];
+      let peak = 0;
+      for (let i = 0; i < 80; i++) { await new Promise(r => setTimeout(r, 50));
+        const b = new Float32Array(slot.analyser.fftSize); slot.analyser.getFloatTimeDomainData(b);
+        let s = 0; for (const v of b) s += v * v; peak = Math.max(peak, Math.sqrt(s / b.length)); }
+      return { rms: peak, slotMids: a.rtc.slotMids.slice(), signaling: a.rtc.pc.signalingState };
+    })()`);
+    back.rms > 0.02 ? ok(`購読を戻すと同じスロットで鳴り出す (RMS ${back.rms.toFixed(3)})`)
+                    : bad('戻しても鳴らない', String(back.rms));
+    JSON.stringify(back.slotMids) === JSON.stringify(midsBefore) && back.signaling === 'stable'
+      ? ok('一連の出入りで mid が一度も動いていない') : bad('mid が動いた');
+  } catch (e) {
+    skip('リレー相手の実地確認', String(e && e.message || e));
+  } finally {
+    if (keepalive) clearInterval(keepalive);
+    try { if (relay) relay.kill('SIGKILL'); } catch {}
+  }
+}
+
   // 3'. console
   const noise = [...cdp.logs, ...page.logs].filter(l => !/favicon/i.test(l));
   noise.length === 0 ? ok('console にエラー / 警告が無い (dev.html / index.html)')
@@ -467,5 +654,6 @@ async function settleText(cdp) {
 }
 
 const failed = results.filter(r => !r[0]);
-console.log(`\n${results.length - failed.length}/${results.length} ok`);
+console.log(`\n${results.length - failed.length}/${results.length} ok` + (skipped.length ? ` / ${skipped.length} skip` : ''));
+for (const [n, w] of skipped) console.log(`  skip: ${n} — ${w}`);
 process.exit(failed.length ? 1 : 0);

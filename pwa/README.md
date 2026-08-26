@@ -48,10 +48,15 @@ node pwa/verify.mjs
 7. **WebRTC をブラウザ内ループバックで通す** — offer の m-line が 17 本 (マイク先頭)、
    `answer` 直後に 16 本を mid ごとに張ること、WebRTC 越しの音が Web Audio に届くこと、
    マイクの入り切りで `signalingState` が `stable` のまま (= 再ネゴシエーションが起きない) こと
-8. console にエラーが出ていないこと
+8. **本物のリレー相手の実地確認** — `relay/examples/dev_relay` を `127.0.0.1` に立てて、
+   名簿外が `bye: not_eligible` で断られること / 購読前は 1 バイトも来ないこと /
+   購読で `peer` が来て実際に鳴ること / `mute_all` で音だけ止まりスロットも `mid` も
+   `PeerConnection` も動かないこと / 戻すと同じスロットで鳴り出すこと。
+   立たなければ **skip**（FAIL にしない）
+9. console にエラーが出ていないこと
 
-**リレーを立てての実地確認はまだ。** ループバックは相手役を同じページに置いているので、
-リレー (#1-1) の `Peer` / `graph` / `yaw` / `talk` の実メッセージまでは通していない。
+`dev_relay` の HTTP は `127.0.0.1` に bind する（既定）。SFU の UDP ソケットは ICE のため
+`0.0.0.0` に bind する（`relay/src/sfu.rs`）ので、ローカル検証以外では立てないこと。
 
 ## 踏み抜いた / 避けた罠
 
