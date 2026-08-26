@@ -292,6 +292,28 @@ impl Roster {
             .unwrap_or_default()
     }
 
+    /// WS 接続時に、その聞き手の現在の状態を撒き直す (issue #11)。
+    ///
+    /// **なぜ要るか**: `graph` は「変化が無ければ送らない」仕様なので
+    /// (docs/protocol.md §1)、途中から接続した PWA は誰かが動くまで `graph` を
+    /// 1 通も受け取れない。静止した場面に入ると無音のまま何も起きない。
+    /// リレーは状態を持っている (`hears_of` / `yaw_of`) のに撒く経路が無かった。
+    ///
+    /// **購読も張り直す。** `graph` だけ送っても RTP が来ないので音は出ない。
+    /// `SetSubscriptions` は `apply_graph` の中からしか送られていなかった。
+    ///
+    /// `hears_of` が TTL・名簿・whitelist を通した後の値を返すので、
+    /// **TTL 切れなら空 = 購読ゼロ = 無音** という fail closed がそのまま効く。
+    pub fn resync(&self, listener: &SteamId) {
+        let hears = self.hears_of(listener);
+        let speakers = speakers_by_distance(&hears);
+        self.subscribe(listener, speakers);
+        self.notify(listener, ServerMsg::Graph { hears });
+        if let Some(deg) = self.yaw_of(listener) {
+            self.notify(listener, ServerMsg::Yaw { deg });
+        }
+    }
+
     /// 聞き手の向き。無ければ None。
     pub fn yaw_of(&self, id: &SteamId) -> Option<u16> {
         let inner = self.inner.lock().expect("Roster poisoned");
