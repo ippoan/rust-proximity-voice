@@ -13,8 +13,8 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(domain = %cfg.domain, "starting relay");
 
-    // TLS 終端と ACME は #1-5 が差し込む (config::bind_tls)
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    // 443 を bind し、ACME (TLS-ALPN-01) で証明書を自動取得・自動更新する。
+    let listener = relay::config::bind_tls(&cfg).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
