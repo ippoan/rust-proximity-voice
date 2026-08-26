@@ -4,3 +4,6 @@
 *.key
 config.toml
 .acme-cache/
+
+# チップセッションの worktree (harness が作る)
+.claude/worktrees/
