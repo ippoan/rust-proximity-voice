@@ -27,7 +27,7 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use crate::proto::{SLOTS, ServerMsg, SteamId};
+use crate::proto::{DISCONNECT_GRACE_S, SLOTS, ServerMsg, SteamId};
 use crate::signal::Hub;
 use crate::state::SfuCommand;
 
@@ -261,6 +261,9 @@ pub struct Session {
     /// **転送だけ止めている状態。** 切断ではない (docs/protocol.md §0)。
     /// スロットの割り当ては保持したままなので、解除しても再ネゴシエーションは起きない
     muted: bool,
+    /// ICE が落ちた時刻。`DISCONNECT_GRACE_S` を過ぎたらトランスポートを回収する。
+    /// 復帰したら `None` に戻る (回線の一時的な揺れで捨てないため)
+    disconnected_since: Option<Instant>,
 }
 
 impl Session {
@@ -270,6 +273,11 @@ impl Session {
 
     pub fn is_muted(&self) -> bool {
         self.muted
+    }
+
+    /// ICE が落ちたまま戻っていないか。
+    pub fn is_disconnected(&self) -> bool {
+        self.disconnected_since.is_some()
     }
 }
 
@@ -383,6 +391,7 @@ impl Sfu {
             pool: SlotPool::new(mlines.slots),
             mic_mid: mlines.mic.as_deref().map(Mid::from),
             muted: false,
+            disconnected_since: None,
         };
 
         tracing::info!(
@@ -527,6 +536,8 @@ impl Sfu {
         // (話者, データ)。sessions を二重に借りられないので一度貯める
         let mut forward: Vec<(SteamId, MediaData)> = Vec::new();
         let mut dead: Vec<SteamId> = Vec::new();
+        // ICE が落ちた人。ループの中では他セッションを触れないので後でまとめて
+        let mut lost: Vec<SteamId> = Vec::new();
 
         for session in self.sessions.values_mut() {
             loop {
@@ -560,6 +571,23 @@ impl Sfu {
                         }
                         Event::IceConnectionStateChange(state) => {
                             tracing::debug!(steam_id = %session.steam_id, ?state, "ice state");
+                            // ★ str0m は Disconnected になっても自分では閉じない
+                            // (`is_alive()` は明示的な `disconnect()` だけを見る)。
+                            // 放っておくと Alt-F4 / クラッシュ / 回線断でセッションが
+                            // 永久に残り、死んだソケットへ RTP を流し続ける。
+                            // docs/protocol.md §0 の「切断は必須で失効」に反する
+                            if state.is_disconnected() {
+                                if session.disconnected_since.is_none() {
+                                    session.disconnected_since = Some(now);
+                                    // 「即座に転送停止」の前半。この人には流さない
+                                    session.muted = true;
+                                    lost.push(session.steam_id.clone());
+                                }
+                            } else if state.is_connected() {
+                                // 一時的な揺れから復帰した。転送の再開は graph が
+                                // 次の SetSubscriptions で行う
+                                session.disconnected_since = None;
+                            }
                         }
                         _ => {}
                     },
@@ -575,6 +603,15 @@ impl Sfu {
         for (speaker, data) in &forward {
             self.forward_to_listeners(speaker, data);
         }
+
+        // 「即座に転送停止」の後半。この人の声を聞いていた全員の枠も、
+        // 猶予を待たずに解放する (聞かせてはいけないものを聞かせないため)
+        for id in &lost {
+            tracing::info!(steam_id = %id, "ice が落ちた。転送を止めて猶予に入る");
+            self.release_speaker(id, hub);
+        }
+
+        self.reap_disconnected(now, hub);
 
         for id in dead {
             tracing::info!(steam_id = %id, "rtc が死んだので回収");
@@ -653,6 +690,32 @@ impl Sfu {
             if session.rtc.is_alive() {
                 let _ = session.rtc.handle_input(Input::Timeout(now));
             }
+        }
+    }
+
+    /// ICE が落ちたまま `DISCONNECT_GRACE_S` を過ぎたトランスポートを回収する。
+    ///
+    /// 転送は落ちた時点で既に止まっている (安全要件はそこで満たされている)。
+    /// ここは資源の後始末で、猶予を置くのは**回線の一時的な揺れで
+    /// PeerConnection を捨てないため** (docs/protocol.md §0)。
+    fn reap_disconnected(&mut self, now: Instant, hub: &Hub) {
+        let grace = Duration::from_secs(DISCONNECT_GRACE_S);
+        let stale: Vec<SteamId> = self
+            .sessions
+            .values()
+            .filter(|s| {
+                s.disconnected_since
+                    .is_some_and(|at| now.saturating_duration_since(at) >= grace)
+            })
+            .map(|s| s.steam_id.clone())
+            .collect();
+
+        for id in stale {
+            tracing::info!(steam_id = %id, "猶予を過ぎたのでトランスポートを回収");
+            // **`Bye` は送らない。** 切断は Bye を伴う 3 場面のどれでもない
+            // (docs/protocol.md)。相手はもう居ないので送る先も無い
+            self.remove_session(&id);
+            self.release_speaker(&id, hub);
         }
     }
 
@@ -1012,6 +1075,7 @@ a=mid:3\r\n";
                 pool: pool(slots),
                 mic_mid: Some(Mid::from("0")),
                 muted: false,
+                disconnected_since: None,
             },
         );
     }
@@ -1082,6 +1146,108 @@ a=mid:3\r\n";
         // 再開しても Peer は飛ばない = PWA 側のスロットは動かない
         let msgs = sfu.set_subscriptions(&listener, &speakers).unwrap();
         assert!(msgs.is_empty(), "再開で Peer が出た: {msgs:?}");
+        assert!(!sfu.session(&listener).unwrap().is_muted());
+    }
+
+    /// ICE が落ちた印を手で付ける (実際は `poll_all` が `Event` を見て付ける)。
+    fn mark_ice_lost(sfu: &mut Sfu, steam_id: &str, at: Instant) {
+        let session = sfu.sessions.get_mut(steam_id).unwrap();
+        session.disconnected_since = Some(at);
+        session.muted = true;
+    }
+
+    #[tokio::test]
+    async fn 猶予の内はトランスポートを保つ() {
+        let mut sfu = Sfu::new(0).unwrap();
+        let hub = Hub::new();
+        let listener = "listener".to_string();
+        insert_fake_session(&mut sfu, &listener, SLOTS);
+
+        let t0 = Instant::now();
+        mark_ice_lost(&mut sfu, &listener, t0);
+
+        // 回線の一時的な揺れで PeerConnection を捨てない
+        sfu.reap_disconnected(t0 + Duration::from_secs(DISCONNECT_GRACE_S - 1), &hub);
+        assert!(sfu.has_session(&listener), "猶予の内に回収された");
+        assert!(sfu.session(&listener).unwrap().is_disconnected());
+        // ただし転送は既に止まっている (安全要件はここで満たされている)
+        assert!(sfu.session(&listener).unwrap().is_muted());
+    }
+
+    #[tokio::test]
+    async fn 猶予を過ぎたらトランスポートを回収する() {
+        let mut sfu = Sfu::new(0).unwrap();
+        let hub = Hub::new();
+        let listener = "listener".to_string();
+        insert_fake_session(&mut sfu, &listener, SLOTS);
+
+        let t0 = Instant::now();
+        mark_ice_lost(&mut sfu, &listener, t0);
+
+        sfu.reap_disconnected(t0 + Duration::from_secs(DISCONNECT_GRACE_S), &hub);
+        assert!(!sfu.has_session(&listener), "猶予を過ぎても回収されない");
+    }
+
+    #[tokio::test]
+    async fn 落ちた人の枠は聞き手から解放される() {
+        let mut sfu = Sfu::new(0).unwrap();
+        let hub = Hub::new();
+        let listener = "listener".to_string();
+        let speaker = "speaker".to_string();
+        let mut reg = hub.register(listener.clone()).unwrap();
+        insert_fake_session(&mut sfu, &listener, SLOTS);
+        insert_fake_session(&mut sfu, &speaker, SLOTS);
+
+        sfu.set_subscriptions(&listener, std::slice::from_ref(&speaker))
+            .unwrap();
+        let mid = sfu
+            .session(&listener)
+            .unwrap()
+            .slots()
+            .mid_of(&speaker)
+            .unwrap()
+            .to_string();
+        while reg.rx.try_recv().is_ok() {} // 割り当ての Peer を捨てる
+
+        // 話者の ICE が落ちて猶予を過ぎる
+        let t0 = Instant::now();
+        mark_ice_lost(&mut sfu, &speaker, t0);
+        sfu.reap_disconnected(t0 + Duration::from_secs(DISCONNECT_GRACE_S), &hub);
+
+        assert!(!sfu.has_session(&speaker));
+        assert!(
+            sfu.session(&listener)
+                .unwrap()
+                .slots()
+                .mid_of(&speaker)
+                .is_none(),
+            "落ちた話者の枠が残っている"
+        );
+        // 聞き手には解放が届き、聞き手自身は切られない
+        assert!(matches!(
+            reg.rx.try_recv(),
+            Ok(ServerMsg::Peer { mid: m, id: None }) if m == mid
+        ));
+        assert!(sfu.has_session(&listener), "相手が落ちて聞き手まで切れた");
+    }
+
+    #[tokio::test]
+    async fn 復帰した相手は回収しない() {
+        let mut sfu = Sfu::new(0).unwrap();
+        let hub = Hub::new();
+        let listener = "listener".to_string();
+        insert_fake_session(&mut sfu, &listener, SLOTS);
+
+        let t0 = Instant::now();
+        mark_ice_lost(&mut sfu, &listener, t0);
+        // ICE が戻ったとき poll_all がやること
+        sfu.sessions.get_mut(&listener).unwrap().disconnected_since = None;
+
+        sfu.reap_disconnected(t0 + Duration::from_secs(DISCONNECT_GRACE_S * 2), &hub);
+        assert!(sfu.has_session(&listener), "復帰したのに回収された");
+
+        // 転送は SetSubscriptions で戻る
+        sfu.set_subscriptions(&listener, &[]).unwrap();
         assert!(!sfu.session(&listener).unwrap().is_muted());
     }
 

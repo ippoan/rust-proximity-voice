@@ -21,8 +21,11 @@
 //   3. 購読すると RTP が流れる
 //   4. mute_all で止まり、**切断はされず**スロットも動かない
 //   5. 再開で戻る
-//   6. 話者が落ちたらスロットがその場で解放され、聞き手は切れない
-//   7. どの段階でも mid が動かない (= 再ネゴシエーションが起きていない)
+//   6. 話者が**行儀よく**閉じたらスロットがその場で解放され、聞き手は切れない
+//   7. 話者が**行儀悪く**消えても (タブごと kill = DTLS の close すら送らない)
+//      同じことが起きる。★ ここを見ていなかったせいで issue #5 を見逃した。
+//      §0 が名指ししている「Alt-F4 / クラッシュ」はこちらであって 6 ではない
+//   8. どの段階でも mid が動かない (= 再ネゴシエーションが起きていない)
 
 import { createHmac } from 'node:crypto';
 
@@ -39,6 +42,8 @@ class Cdp {
     const ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((ok, ng) => { ws.onopen = ok; ws.onerror = ng; });
     const cdp = new Cdp(ws);
+    cdp.targetId = target.id;
+    cdp.port = port;
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
       if (m.id && cdp.pending.has(m.id)) { cdp.pending.get(m.id)(m); cdp.pending.delete(m.id); }
@@ -51,6 +56,11 @@ class Cdp {
     this.ws.send(JSON.stringify({ id, method, params }));
     return new Promise(res => this.pending.set(id, res));
   }
+  /** ブラウザのタブごと落とす。DTLS の close も ICE の後始末も送らない。 */
+  async killTarget(port, targetId) {
+    await fetch(`http://127.0.0.1:${port}/json/close/${targetId}`);
+  }
+
   async eval(expr) {
     const r = await this.send('Runtime.evaluate', {
       expression: expr, awaitPromise: true, returnByValue: true,
@@ -223,5 +233,49 @@ const aliceState = await alice.eval(`pc.connectionState`);
 console.log('alice の pc:', aliceState);
 if (aliceState !== 'connected') throw new Error('相手の切断で alice まで切れた');
 
-console.log('\n✅ 名簿外は断られ、ブラウザ 2 枚で音が通り、mute で止まり、再開で戻り、切断で解放され、mid は一度も動かなかった');
+// --- 7. ★ 行儀の悪い切断 (issue #5) -----------------------------------------
+// タブごと落とすと DTLS の close も ICE の後始末も飛ばない。str0m は
+// `Disconnected` を出すだけで自分では閉じないので、サーバーが自分で
+// 「転送停止 → 猶予後に回収」をやらないとセッションが永久に残る。
+console.log('\n--- 行儀の悪い切断 (タブごと kill) ---');
+console.log('POST /internal/roster →', await internal('/internal/roster', { eligible: ['alice', 'carol'] }));
+
+const carol = await Cdp.attach(portB, `${HTTP}/?steam_id=carol`);
+await carol.eval(`document.getElementById('connect').click(); 1`);
+await waitFor(() => carol.eval(`typeof pc !== 'undefined' && !!pc && pc.connectionState === 'connected'`),
+              'carol が connected になる');
+console.log('POST /dev/subscribe →', await post('/dev/subscribe', { listener: 'alice', speakers: ['carol'] }));
+
+const c0 = await alice.eval(RX_BYTES);
+await sleep(2500);
+const c1 = await alice.eval(RX_BYTES);
+console.log(`carol からの受信バイト: ${c0} → ${c1} (差 ${c1 - c0})`);
+if (c1 - c0 < 1000) throw new Error('carol の音が通っていない');
+
+// ★ ここが本番。close() を呼ばずにタブごと消す
+console.log('carol のタブを kill する (pc.close() も ws.close() も呼ばない)');
+await carol.killTarget(carol.port, carol.targetId);
+
+// 「即座に転送停止」— 猶予 (60s) を待たずに枠が解放されること
+const t = Date.now();
+await waitFor(async () => {
+  const rows = await alice.eval(SLOT_TABLE);
+  return rows.length === 0 ? true : null;
+}, '行儀の悪い切断でも枠が解放される', 40000);
+console.log(`枠が解放されるまで ${((Date.now() - t) / 1000).toFixed(1)}s (猶予 60s を待っていない)`);
+
+const k0 = await alice.eval(RX_BYTES);
+await sleep(3000);
+const k1 = await alice.eval(RX_BYTES);
+console.log(`kill 後の受信バイト: ${k0} → ${k1} (差 ${k1 - k0})`);
+if (k1 - k0 > 500) throw new Error('タブを kill したのに RTP が流れている');
+
+const aliceAfterKill = await alice.eval(`pc.connectionState`);
+const midsAfterKill = await alice.eval(`pc.getTransceivers().map(t => t.mid)`);
+console.log('alice の pc:', aliceAfterKill);
+if (aliceAfterKill !== 'connected') throw new Error('相手を kill したら alice まで切れた');
+if (JSON.stringify(midsAfterKill) !== JSON.stringify(shape.mids)) throw new Error('mid が動いた');
+
+console.log('\n✅ 名簿外は断られ、音が通り、mute で止まり、再開で戻り、');
+console.log('   行儀よく閉じても行儀悪く消えても枠が解放され、mid は一度も動かなかった');
 process.exit(0);
