@@ -25,7 +25,10 @@ window.PV = window.PV || {};
     this.ctx = opts.ctx || null;
     this.master = null;
     this.slots = Object.create(null);    // mid -> slot
-    this.byPeer = Object.create(null);   // steamId -> slot
+    // 直近の graph = 「今 このブラウザが聞ける相手」の**全状態** (docs/protocol.md §2)。
+    // スロットの音量はここから導く。graph は「変化時のみ」なので、
+    // **一度取りこぼすと次が来ない**。だから保持して、peer の割り当て時に引き直す
+    this.hears = Object.create(null);    // steamId -> { d, b, sub }
     this.yaw = 0;
     // <audio> 要素の置き場。**Chrome の罠 (下記 _attach) のためだけに要る**
     this.sinkHost = null;
@@ -142,13 +145,29 @@ window.PV = window.PV || {};
    */
   AudioEngine.prototype.setPeer = function (mid, steamId) {
     var s = this._slot(mid);
-    if (s.steamId && this.byPeer[s.steamId] === s) delete this.byPeer[s.steamId];
     s.steamId = steamId || null;
-    s.d = Infinity;
-    s.sub = false;
-    if (s.steamId) this.byPeer[s.steamId] = s;
-    this._applySlot(s);
+    // ★ **graph が peer より先に来ることがある。**
+    //   リレー側で Graph は Hub へ直接、Peer は SFU のタスクを経由して出るので、
+    //   接続時の撒き直し (issue #11) では Graph のほうが先に届く。
+    //   ここで直近の graph を引き直さないと、静止した場面では次の graph が
+    //   来ないまま無音のままになる。
+    this._syncSlot(s);
     return s;
+  };
+
+  /** スロットの d / b / sub を、保持してある graph の全状態から引き直す */
+  AudioEngine.prototype._syncSlot = function (s) {
+    var h = s.steamId ? this.hears[s.steamId] : null;
+    if (h) {
+      s.d = Number(h.d);
+      s.bWorld = Number(h.b) || 0;
+      s.sub = !!h.sub;
+    } else {
+      // graph に載っていない = 聞こえない。未知は無音 (fail closed)
+      s.d = Infinity;
+      s.sub = false;
+    }
+    this._applySlot(s);
   };
 
   /**
@@ -156,6 +175,7 @@ window.PV = window.PV || {};
    * 新しい PeerConnection の peer が来るまで、古い対応で鳴らさないため。
    */
   AudioEngine.prototype.releaseAll = function () {
+    this.hears = Object.create(null);
     for (var mid in this.slots) this.setPeer(mid, null);
   };
 
@@ -164,25 +184,12 @@ window.PV = window.PV || {};
    * hears は「今そのブラウザが聞ける相手」の**全状態**。載っていない相手は無音にする。
    */
   AudioEngine.prototype.applyGraph = function (hears) {
-    var seen = Object.create(null);
     var list = hears || [];
-    for (var i = 0; i < list.length; i++) {
-      var h = list[i];
-      var s = this.byPeer[h.id];
-      if (!s) continue; // peer がまだ来ていない。次の graph で拾う
-      seen[h.id] = true;
-      s.d = Number(h.d);
-      s.bWorld = Number(h.b) || 0;
-      s.sub = !!h.sub;
-      this._applySlot(s);
-    }
-    // graph から消えた = もう聞こえない
-    for (var id in this.byPeer) {
-      if (!seen[id]) {
-        var t = this.byPeer[id];
-        if (t.d !== Infinity) { t.d = Infinity; this._applySlot(t); }
-      }
-    }
+    var next = Object.create(null);
+    for (var i = 0; i < list.length; i++) next[list[i].id] = list[i];
+    // 差分ではなく置き換え。載っていない相手は「もう聞こえない」
+    this.hears = next;
+    for (var mid in this.slots) this._syncSlot(this.slots[mid]);
   };
 
   /** { "t":"yaw", deg } — 20Hz。**pan だけ**を再計算する (gain は触らない) */
@@ -251,7 +258,7 @@ window.PV = window.PV || {};
       if (s.audioEl) { s.audioEl.srcObject = null; s.audioEl.remove(); }
     }
     this.slots = Object.create(null);
-    this.byPeer = Object.create(null);
+    this.hears = Object.create(null);
   };
 
   PV.AudioEngine = AudioEngine;
