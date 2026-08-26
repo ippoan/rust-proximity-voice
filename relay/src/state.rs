@@ -46,7 +46,22 @@ pub enum SfuCommand {
     /// その聞き手への **RTP 転送を止めるだけ**。**切断しない**
     /// (死亡・roster TTL 切れ。docs/protocol.md §0)
     MuteAll { listener: SteamId },
-    /// セッションの終了 (二重接続・BAN・shutdown のときだけ)。
+    /// セッションの終了。
+    ///
+    /// **★ 実測 (2026-08-26): `reason` はコードベース全体で `NotEligible` しか取らない。**
+    /// 送っているのは `web.rs` の接続時認可 1 箇所だけで、他の 2 つの `ByeReason` は
+    /// `SfuCommand` を経由しない:
+    ///   - `DuplicateSession` … `Hub::register` の中で完結
+    ///   - `ServerShutdown`   … `Hub::kick_all` の中で完結
+    /// `roster.rs` は `Disconnect` を 1 回も送らない (管理者 BAN で WS を切る機能は
+    /// docs/protocol.md で意図的に実装しないと決めたため)。
+    ///
+    /// **この enum フィールドが実質定数であることを知らずに整理すると判断を誤る。**
+    /// `ByeReason` 自体は仕様の 3 場面に対応する型として `proto.rs` に必要。
+    ///
+    /// 正常な WS 切断はここを通らない。**Hub の登録がセッションの生存条件**で、
+    /// `sfu::run` が `!hub.is_connected(id)` を見て畳む (経路ごとに通知する形だと
+    /// 言い忘れた経路が静かに壊れるため。実際に #7 がその形だった)。
     ///
     /// **`ServerMsg::Bye` を送って WS を閉じるのは受け手 (`sfu::run` / `Hub`) の責務。**
     /// 呼び出し側は `Bye` を流さない。`Peer` と同じく送出元を 1 箇所に寄せる。
