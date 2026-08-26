@@ -30,7 +30,11 @@ pub fn build(cfg: Arc<config::Config>) -> (axum::Router, state::AppState) {
 
     // Roster は起動時に依存を全部受け取る。routes() の中で後から差す形にすると、
     // web.rs が routes() を呼び忘れた瞬間に whitelist と転送が無音で効かなくなる。
-    let roster = Arc::new(roster::Roster::new(cfg.clone(), sfu_tx.clone(), hub.clone()));
+    let roster = Arc::new(roster::Roster::new(
+        cfg.clone(),
+        sfu_tx.clone(),
+        hub.clone(),
+    ));
     {
         let hub = hub.clone();
         let port = cfg.udp_port;
