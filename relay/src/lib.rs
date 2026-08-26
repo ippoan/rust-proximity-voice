@@ -3,10 +3,6 @@
 //! bin (`main.rs`) と、`examples/` `tests/` の両方から使えるよう lib にしてある。
 //! `mod` をここに集約し、bin 側では二重宣言しない (二重コンパイルになるため)。
 
-// スタブ段階では未使用の関数が大量にある。**全タスクの実装が入ったら外すこと。**
-// CI が clippy -D warnings なので、これが無いと骨格の時点で赤くなる。
-#![allow(dead_code)]
-
 pub mod auth;
 pub mod config;
 pub mod proto;
