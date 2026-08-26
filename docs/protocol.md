@@ -234,6 +234,35 @@ WebSocket。Cookie のトークンで認証する。
 | `SfuCommand::SetSubscriptions` の `speakers` | **距離の近い順に並んでいること**。並べる責任は呼び出し側 (graph を持つ `roster.rs`)。SFU 側は先頭 `SLOTS` 件に切り詰めるだけ |
 | `SfuCommand::MuteAll` | **スロット割り当てを保持したまま転送だけ止める。** 解放して `Peer{id:null}` を撒くと、死亡/リスポーンのたびに PWA 側でスロットが動いて音が飛ぶ。`SetSubscriptions` を呼ぶと mute が解ける (= 転送停止 / 再開) |
 | 既に割り当て済みの相手の `mid` | `SetSubscriptions` を連続で呼んでも**変わらないこと**。変わると PWA 側の音が途切れる |
+| **`ServerMsg::Peer` を送出するのは SFU だけ** | 呼び出し側は流さない（二重送信になる）。`Disconnect` のように reply を持たない指令でもスロットは動くので、送出元を 1 箇所に寄せる。`SetSubscriptions` の reply は `Result<()>` |
+| **`ServerMsg::Bye` を送るのも 1 箇所だけ** | `SfuCommand::Disconnect { steam_id, reason }` を受けた側（`sfu::run` / `Hub`）が `Bye` を送って WS を閉じる。`roster.rs` は `Bye` を流さない |
+| **`Roster` の依存は起動時に全部渡す** | `routes()` の中で後から差さない。`web.rs` が `routes()` を呼び忘れた瞬間に whitelist と転送が**無音で**効かなくなるため |
+
+**`Bye` を送る 3 つの場面と、送る主体**
+
+| `ByeReason` | いつ | 誰が起点か |
+|---|---|---|
+| `not_eligible` | **接続時**に名簿・whitelist を満たさない | `/ws` ハンドラ |
+| `duplicate_session` | 同一 SteamID の後勝ち | `Hub::register` |
+| `server_shutdown` | 停止時 | `sfu::run` / `Hub` |
+
+**接続後に認可を失った場合は `Bye` ではない。** §0 のとおり転送を止めるだけで、
+トランスポートは維持する（死亡・roster TTL 切れ・BAN）。
+
+#### 管理者 BAN で WS を切る機能は、意図的に実装しない（親が決定、2026-08-26）
+
+`RosterPush` は `eligible` のフル名簿だけなので、リレーからは**「BAN された」「ログアウトした」
+「死亡して外れた」が全部同じ事象**に見える（#1-3 の指摘）。ここで `Disconnect` を送ると
+死亡・リスポーンのたびに PeerConnection を張り直すことになり、§0 に真正面から反する。
+
+**やらない理由**: §0 の要件は「聞こえてはいけない音声が届かないこと」であり、BAN された
+利用者は `MuteAll` で既に何も聞こえない。加えてゲームサーバーからも切られるので名簿から消える。
+残る差は **WS が張りっぱなしになること**だけで、安全性の問題ではない。区別のためにプラグイン側の
+状態を 1 つ増やすほうが、間違える場所を増やすぶん高くつく。
+
+**もし将来やるなら**: `RosterPush` に `banned: Vec<SteamId>` を足す（`eligible` から消えた
+∧ `banned` に居る、で判定）。「毎回フル」の性質を保てるので endpoint と seq counter を
+増やさずに済む。`POST /internal/ban` の新設は採らない。
 
 ### yaw は graph と分けて送る
 
