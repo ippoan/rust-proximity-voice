@@ -186,6 +186,13 @@ async fn serve_ws(socket: WebSocket, st: WsState, steam_id: SteamId) {
         },
     );
 
+    // 現在の可聴集合と向きを撒き、購読も張り直す (issue #11)。
+    //
+    // `graph` は「変化が無ければ送らない」仕様なので、これが無いと
+    // **途中から接続した人は誰かが動くまで無音**になる。リレーは状態を
+    // 持っているのに撒く経路が無かった。
+    st.app.roster.resync(&steam_id);
+
     while let Some(Ok(msg)) = stream.next().await {
         let text = match msg {
             Message::Text(t) => t,
