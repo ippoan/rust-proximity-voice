@@ -659,12 +659,17 @@ console.log('\nD. リレー (relay/examples/dev_relay) 相手の実地確認');
         let s = 0; for (const v of b) s += v * v; peak = Math.max(peak, Math.sqrt(s / b.length)); }
       let bytes = 0;
       (await c.rtc.pc.getStats()).forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio') bytes += r.bytesReceived || 0; });
+      const heardIds = c.graphs.flatMap(g => (g.hears || []).map(h => h.id));
       return { assigned: true, rms: peak, gain: slot.gain.gain.value, d: slot.d,
-               bytes, graphs: c.graphs.length, speaking: c.engine.speaking().length };
+               bytes, graphs: c.graphs.length, heardIds, speaking: c.engine.speaking().length };
     })()`);
     closed.assigned ? ok('carol にも peer が来てスロットが割り当たる') : bad('carol に peer が来ない');
     closed.bytes > 0 ? ok(`carol には RTP が届いている (${closed.bytes} bytes)`) : bad('RTP が届いていない', String(closed.bytes));
-    closed.graphs === 0 ? ok('carol には graph が 1 通も来ていない') : bad('graph が来てしまった', String(closed.graphs));
+    // 接続時の resync で**空の** graph は届く。それは正しい (「今は誰も聞こえない」の通知)。
+    // 要件は「bob が載った graph が来ていないのに鳴っていない」こと
+    closed.heardIds.length === 0
+      ? ok(`carol の graph に載った相手はゼロ (graph ${closed.graphs} 通、すべて空)`)
+      : bad('聞こえるはずのない相手が graph に載った', closed.heardIds.join(','));
     closed.gain === 0 && closed.rms < 0.005
       ? ok('★ graph の無い相手は鳴らない (d 未知 = 無音。fail closed)')
       : bad('graph が無いのに鳴っている', `gain ${closed.gain} rms ${closed.rms}`);
@@ -693,14 +698,20 @@ console.log('\nD. リレー (relay/examples/dev_relay) 相手の実地確認');
           const b = new Float32Array(slot.analyser.fftSize); slot.analyser.getFloatTimeDomainData(b);
           let s = 0; for (const v of b) s += v * v; peak = Math.max(peak, Math.sqrt(s / b.length)); }
         gain = slot.gain.gain.value; pan = slot.pan.pan.value; }
+      let bytes = 0;
+      (await d.rtc.pc.getStats()).forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio') bytes += r.bytesReceived || 0; });
       return { conn: d.rtc.pc && d.rtc.pc.connectionState, graphs: d.graphs.length, yaws: d.yaws.length,
-               peer: !!p, rms: peak, gain, pan };
+               heardIds: d.graphs.flatMap(g => (g.hears || []).map(h => h.id)),
+               peer: !!p, peers: d.peers.slice(), bytes, rms: peak, gain, pan };
     })()`);
     late.conn === 'connected' ? ok('dave が繋がる') : bad('dave が繋がらない', String(late.conn));
     late.graphs > 0 ? ok(`★ 静止したまま接続しても graph が届く (${late.graphs} 通)`)
                     : bad('★ 途中参加に graph が来ない (issue #11)', '0 通 — 誰かが動くまで永久に無音');
+    late.heardIds.includes('bob')
+      ? ok(`graph の中身も正しい (hears に bob が載っている: ${late.heardIds.join(',')})`)
+      : bad('graph は来たが bob が載っていない', late.heardIds.join(',') || '(空)');
     late.peer ? ok('接続時に peer が来てスロットが割り当たる')
-              : bad('接続時に peer が来ない (issue #11)', '購読が張られていない');
+              : bad('接続時に peer が来ない', `peers=${JSON.stringify(late.peers)} 受信 ${late.bytes} bytes — graph は届いているので購読 (SetSubscriptions) だけが効いていない`);
     late.yaws > 0 ? ok(`接続時に yaw も届く (${late.yaws} 通)`) : bad('接続時に yaw が来ない (issue #11)');
     late.rms > 0.02 ? ok(`★ 途中参加でも音が鳴る (RMS ${late.rms.toFixed(3)})`)
                     : bad('★ 途中参加が無音のまま (issue #11)', `gain ${late.gain} rms ${late.rms}`);
